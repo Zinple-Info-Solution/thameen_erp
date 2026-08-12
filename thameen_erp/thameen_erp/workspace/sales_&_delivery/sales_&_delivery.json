@@ -1,0 +1,215 @@
+{
+ "charts": [],
+ "content": "[{\"id\": \"5c70c6e28b\", \"type\": \"header\", \"data\": {\"text\": \"<span class=\\\"h4\\\"><b>Order to Cash</b></span>\", \"col\": 12}}, {\"id\": \"75e43af7e0\", \"type\": \"shortcut\", \"data\": {\"shortcut_name\": \"Customer Requirement\", \"col\": 3}}, {\"id\": \"54b4900c79\", \"type\": \"shortcut\", \"data\": {\"shortcut_name\": \"Sales Order\", \"col\": 3}}, {\"id\": \"24fe6da176\", \"type\": \"shortcut\", \"data\": {\"shortcut_name\": \"Delivery Trip\", \"col\": 3}}, {\"id\": \"2cb3359230\", \"type\": \"shortcut\", \"data\": {\"shortcut_name\": \"Sales Invoice\", \"col\": 3}}, {\"id\": \"2585a3efc4\", \"type\": \"spacer\", \"data\": {\"col\": 12}}, {\"id\": \"26570234c6\", \"type\": \"header\", \"data\": {\"text\": \"<span class=\\\"h4\\\"><b>Manage</b></span>\", \"col\": 12}}, {\"id\": \"6591d7fd61\", \"type\": \"card\", \"data\": {\"card_name\": \"Requirement & Approval\", \"col\": 4}}, {\"id\": \"e3a5e6a624\", \"type\": \"card\", \"data\": {\"card_name\": \"Orders & Trips\", \"col\": 4}}, {\"id\": \"db1ab150ca\", \"type\": \"card\", \"data\": {\"card_name\": \"Billing\", \"col\": 4}}]",
+ "creation": "2026-08-05 10:00:00",
+ "custom_blocks": [],
+ "docstatus": 0,
+ "doctype": "Workspace",
+ "for_user": "",
+ "hide_custom": 0,
+ "icon": "fal fa-handshake",
+ "idx": 0,
+ "is_hidden": 0,
+ "label": "Sales & Delivery",
+ "links": [
+  {
+   "hidden": 0,
+   "is_query_report": 0,
+   "label": "Requirement & Approval",
+   "link_count": 4,
+   "onboard": 0,
+   "type": "Card Break"
+  },
+  {
+   "hidden": 0,
+   "is_query_report": 0,
+   "label": "Customer Requirement",
+   "link_count": 0,
+   "link_to": "Customer Requirement",
+   "link_type": "DocType",
+   "onboard": 1,
+   "type": "Link"
+  },
+  {
+   "dependencies": "Customer Requirement",
+   "hidden": 0,
+   "is_query_report": 1,
+   "label": "Customer Requirement Report",
+   "link_count": 0,
+   "link_to": "Customer Requirement Report",
+   "link_type": "Report",
+   "onboard": 0,
+   "type": "Link"
+  },
+  {
+   "hidden": 0,
+   "is_query_report": 0,
+   "label": "Customer",
+   "link_count": 0,
+   "link_to": "Customer",
+   "link_type": "DocType",
+   "onboard": 0,
+   "type": "Link"
+  },
+  {
+   "hidden": 0,
+   "is_query_report": 0,
+   "label": "Project",
+   "link_count": 0,
+   "link_to": "Project",
+   "link_type": "DocType",
+   "onboard": 0,
+   "type": "Link"
+  },
+  {
+   "hidden": 0,
+   "is_query_report": 0,
+   "label": "Orders & Trips",
+   "link_count": 4,
+   "onboard": 0,
+   "type": "Card Break"
+  },
+  {
+   "hidden": 0,
+   "is_query_report": 0,
+   "label": "Sales Order",
+   "link_count": 0,
+   "link_to": "Sales Order",
+   "link_type": "DocType",
+   "onboard": 0,
+   "type": "Link"
+  },
+  {
+   "hidden": 0,
+   "is_query_report": 0,
+   "label": "Delivery Trip",
+   "link_count": 0,
+   "link_to": "Delivery Trip",
+   "link_type": "DocType",
+   "onboard": 0,
+   "type": "Link"
+  },
+  {
+   "hidden": 0,
+   "is_query_report": 0,
+   "label": "Delivery Note",
+   "link_count": 0,
+   "link_to": "Delivery Note",
+   "link_type": "DocType",
+   "onboard": 0,
+   "type": "Link"
+  },
+  {
+   "dependencies": "Delivery Trip",
+   "hidden": 0,
+   "is_query_report": 1,
+   "label": "Delivery Performance And POD Pending",
+   "link_count": 0,
+   "link_to": "Delivery Performance And POD Pending",
+   "link_type": "Report",
+   "onboard": 0,
+   "type": "Link"
+  },
+  {
+   "hidden": 0,
+   "is_query_report": 0,
+   "label": "Billing",
+   "link_count": 3,
+   "onboard": 0,
+   "type": "Card Break"
+  },
+  {
+   "hidden": 0,
+   "is_query_report": 0,
+   "label": "Sales Invoice",
+   "link_count": 0,
+   "link_to": "Sales Invoice",
+   "link_type": "DocType",
+   "onboard": 0,
+   "type": "Link"
+  },
+  {
+   "hidden": 0,
+   "is_query_report": 0,
+   "label": "Payment Entry",
+   "link_count": 0,
+   "link_to": "Payment Entry",
+   "link_type": "DocType",
+   "onboard": 0,
+   "type": "Link"
+  },
+  {
+   "dependencies": "Sales Invoice",
+   "hidden": 0,
+   "is_query_report": 1,
+   "label": "Accounts Receivable",
+   "link_count": 0,
+   "link_to": "Accounts Receivable",
+   "link_type": "Report",
+   "onboard": 0,
+   "type": "Link"
+  }
+ ],
+ "modified": "2026-08-12 18:42:05.891952",
+ "modified_by": "Administrator",
+ "module": "Thameen ERP",
+ "name": "Sales & Delivery",
+ "number_cards": [],
+ "owner": "Administrator",
+ "parent_page": "",
+ "public": 1,
+ "quick_lists": [],
+ "roles": [
+  {
+   "role": "Sales Manager"
+  },
+  {
+   "role": "Sales User"
+  },
+  {
+   "role": "Operation Manager"
+  },
+  {
+   "role": "Accounts Manager"
+  },
+  {
+   "role": "System Manager"
+  }
+ ],
+ "sequence_id": 21.0,
+ "shortcuts": [
+  {
+   "color": "Yellow",
+   "doc_view": "List",
+   "label": "Customer Requirement",
+   "link_to": "Customer Requirement",
+   "stats_filter": "{\"status\": [\"in\", [\"Pending Sales Approval\", \"Pending Finance Approval\"]]}",
+   "type": "DocType"
+  },
+  {
+   "color": "Blue",
+   "doc_view": "List",
+   "label": "Sales Order",
+   "link_to": "Sales Order",
+   "stats_filter": "{\"status\": [\"not in\", [\"Closed\", \"Cancelled\"]]}",
+   "type": "DocType"
+  },
+  {
+   "color": "Orange",
+   "doc_view": "List",
+   "label": "Delivery Trip",
+   "link_to": "Delivery Trip",
+   "stats_filter": "{\"status\": [\"in\", [\"Delivered\", \"POD Pending\"]]}",
+   "type": "DocType"
+  },
+  {
+   "color": "Green",
+   "doc_view": "List",
+   "label": "Sales Invoice",
+   "link_to": "Sales Invoice",
+   "stats_filter": "{\"status\": [\"in\", [\"Unpaid\", \"Overdue\"]]}",
+   "type": "DocType"
+  }
+ ],
+ "title": "Sales & Delivery"
+}
