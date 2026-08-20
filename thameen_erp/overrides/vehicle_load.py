@@ -1,0 +1,351 @@
+"""How much room is left on a truck, and what to do when there is not enough.
+
+A truck has a rated Capacity, which never changes, and an Available Qty, which
+does. Available Qty is what is left after the loads already committed to that
+truck on other open trips:
+
+    TRUCK-01   capacity      300
+               committed     180   (TRIP-0005, still In Transit)
+               available     120
+
+Planning 500 onto that truck is not one overloaded trip. It is 120 now and 380
+across further trips. The Delivery Trip form checks this the moment a vehicle is
+chosen and offers to do the split, rather than letting the dispatcher discover
+the problem at the weighbridge.
+
+Two numbers, two checks
+    Available Qty  moves as trips come and go — the everyday check.
+    Capacity       is the ceiling — used when the truck is empty, and as the
+                   size of every follow-on trip the split creates.
+
+What counts as committed
+    Submitted trips at Scheduled, Loading or In Transit. Draft trips do not
+    hold space: a dispatcher builds several drafts while planning and only
+    commits by submitting. Once a trip reaches Delivered the goods are off the
+    truck, so the space comes back.
+
+Available Qty is stored on the Vehicle so it can be seen in list views and
+reports, but it is always recomputed from the trips rather than incremented, so
+a missed hook can never leave it permanently wrong.
+"""
+
+import json
+
+import frappe
+from frappe import _
+from frappe.utils import cint, flt, get_link_to_form
+
+from thameen_erp.overrides.trip_split import (
+	QTY_TOLERANCE,
+	describe_loads,
+	split_by_capacity,
+	stock_qty,
+)
+
+# Submitted trips in these states are holding space on the truck.
+COMMITTED_STATES = ("Scheduled", "Loading", "In Transit")
+
+
+# ---------------------------------------------------------------------------
+# Reading the load
+# ---------------------------------------------------------------------------
+
+
+def get_committed_qty(vehicle, exclude_trip=None):
+	"""Stock-UOM qty sitting on, or promised to, this truck right now."""
+	if not vehicle:
+		return 0.0
+
+	conditions = ["t.vehicle = %(vehicle)s", "t.docstatus = 1", "t.status in %(states)s"]
+	values = {"vehicle": vehicle, "states": COMMITTED_STATES}
+
+	if exclude_trip:
+		conditions.append("t.name != %(exclude)s")
+		values["exclude"] = exclude_trip
+
+	result = frappe.db.sql(
+		f"""
+		select sum(ifnull(i.qty, 0) * ifnull(nullif(i.conversion_factor, 0), 1))
+		from `tabDelivery Trip Item` i
+		inner join `tabDelivery Trip` t on t.name = i.parent
+		where {" and ".join(conditions)}
+		""",
+		values,
+	)
+
+	return flt(result[0][0]) if result and result[0] else 0.0
+
+
+def refresh_vehicle_load(vehicle):
+	"""Recompute and store Committed / Available on the Vehicle.
+
+	Always a full recount, never an increment — a hook that fails to fire can
+	then only make the figure stale for one save, not wrong forever.
+	"""
+	if not vehicle or not frappe.db.exists("Vehicle", vehicle):
+		return
+
+	capacity = flt(frappe.db.get_value("Vehicle", vehicle, "custom_capacity"))
+	committed = get_committed_qty(vehicle)
+	available = max(capacity - committed, 0.0) if capacity else 0.0
+
+	frappe.db.set_value(
+		"Vehicle",
+		vehicle,
+		{"custom_committed_qty": committed, "custom_available_qty": available},
+		update_modified=False,
+	)
+
+
+@frappe.whitelist()
+def get_vehicle_load(vehicle, trip=None):
+	"""Everything the form needs to decide whether this trip fits."""
+	if not vehicle:
+		return {}
+
+	capacity = flt(frappe.get_cached_value("Vehicle", vehicle, "custom_capacity"))
+	committed = get_committed_qty(vehicle, exclude_trip=trip)
+	available = max(capacity - committed, 0.0) if capacity else 0.0
+
+	planned = 0.0
+	if trip and frappe.db.exists("Delivery Trip", trip):
+		rows = frappe.get_all(
+			"Delivery Trip Item",
+			filters={"parent": trip, "parenttype": "Delivery Trip"},
+			fields=["qty", "conversion_factor"],
+		)
+		planned = sum(stock_qty(row) for row in rows)
+
+	overflow = max(planned - available, 0.0) if capacity else 0.0
+
+	return {
+		"vehicle": vehicle,
+		"capacity": capacity,
+		"committed_qty": committed,
+		"available_qty": available,
+		"planned_qty": planned,
+		"overflow_qty": overflow if overflow > QTY_TOLERANCE else 0.0,
+		"fits": overflow <= QTY_TOLERANCE,
+		"has_capacity": bool(capacity),
+		"committed_trips": _committed_trips(vehicle, exclude_trip=trip),
+	}
+
+
+def _committed_trips(vehicle, exclude_trip=None):
+	"""The open trips that are eating the space — shown so the dispatcher can
+	see WHY a truck with 300 capacity only has 120 free."""
+	filters = {"vehicle": vehicle, "docstatus": 1, "status": ("in", COMMITTED_STATES)}
+	if exclude_trip:
+		filters["name"] = ("!=", exclude_trip)
+
+	trips = frappe.get_all(
+		"Delivery Trip", filters=filters, fields=["name", "status"], limit=20
+	)
+
+	for row in trips:
+		rows = frappe.get_all(
+			"Delivery Trip Item",
+			filters={"parent": row.name, "parenttype": "Delivery Trip"},
+			fields=["qty", "conversion_factor"],
+		)
+		row["qty"] = sum(stock_qty(item) for item in rows)
+
+	return trips
+
+
+# ---------------------------------------------------------------------------
+# Planning the split
+# ---------------------------------------------------------------------------
+
+
+@frappe.whitelist()
+def preview_split(trip, vehicle=None, use_capacity=0):
+	"""What splitting this trip would produce. Nothing is written.
+
+	`use_capacity` ignores what is already committed and packs against the full
+	rated capacity — the "the truck will be empty by then" case.
+	"""
+	doc = frappe.get_doc("Delivery Trip", trip)
+	vehicle = vehicle or doc.get("vehicle")
+
+	if not vehicle:
+		frappe.throw(_("Choose a vehicle first — there is nothing to measure against."))
+
+	load = get_vehicle_load(vehicle, trip=trip)
+	if not load.get("has_capacity"):
+		frappe.throw(
+			_("Vehicle {0} has no Capacity set, so the load cannot be checked. "
+			  "Set Capacity on the vehicle first.").format(frappe.bold(vehicle))
+		)
+
+	capacity = flt(load["capacity"])
+	first = capacity if cint(use_capacity) else flt(load["available_qty"])
+
+	loads = split_by_capacity(doc.get("custom_trip_items") or [], capacity, first_capacity=first)
+
+	return {
+		**load,
+		"first_capacity": first,
+		"loads": describe_loads(loads),
+		"trip_count": len(loads),
+	}
+
+
+@frappe.whitelist()
+def split_trip(trip, vehicle=None, use_capacity=0, assignments=None):
+	"""Trim this trip to what fits and put the rest on fresh draft trips.
+
+	`assignments` is an optional JSON list of vehicle names for the follow-on
+	trips, in order. Anything not named is left without a vehicle for the
+	dispatcher to fill in.
+
+	Order matters: the current trip is trimmed and saved BEFORE the siblings are
+	created. The other way round, the new trips would fail their own pending-qty
+	validation, because this trip would still be holding the full quantity.
+	"""
+	frappe.has_permission("Delivery Trip", "write", doc=trip, throw=True)
+
+	doc = frappe.get_doc("Delivery Trip", trip)
+
+	if doc.docstatus != 0:
+		frappe.throw(
+			_("Only a draft trip can be split. Cancel and amend {0}, or plan the "
+			  "remainder as a new trip from the Sales Order.").format(trip)
+		)
+
+	vehicle = vehicle or doc.get("vehicle")
+	if not vehicle:
+		frappe.throw(_("Choose a vehicle first."))
+
+	if isinstance(assignments, str):
+		assignments = json.loads(assignments or "[]")
+	assignments = assignments or []
+
+	load = get_vehicle_load(vehicle, trip=trip)
+	if not load.get("has_capacity"):
+		frappe.throw(_("Vehicle {0} has no Capacity set.").format(frappe.bold(vehicle)))
+
+	capacity = flt(load["capacity"])
+	first = capacity if cint(use_capacity) else flt(load["available_qty"])
+
+	if first <= QTY_TOLERANCE:
+		frappe.throw(
+			_("{0} has no free space at all — {1} of its {2} capacity is already committed. "
+			  "Choose a different vehicle.").format(
+				frappe.bold(vehicle), flt(load["committed_qty"], 2), flt(capacity, 2)
+			)
+		)
+
+	loads = split_by_capacity(doc.get("custom_trip_items") or [], capacity, first_capacity=first)
+
+	if len(loads) <= 1:
+		frappe.throw(_("This trip already fits on {0} — nothing to split.").format(vehicle))
+
+	template = _trip_header(doc)
+
+	# 1. Trim the current trip down to the first load.
+	doc.vehicle = vehicle
+	doc.set("custom_trip_items", [])
+	for row in loads[0]:
+		doc.append("custom_trip_items", _row_values(row))
+	doc.save()
+
+	# 2. Everything else becomes a fresh draft.
+	created = []
+	for index, chunk in enumerate(loads[1:]):
+		new_trip = frappe.new_doc("Delivery Trip")
+		new_trip.update(template)
+
+		assigned = assignments[index] if index < len(assignments) else None
+		if assigned:
+			new_trip.vehicle = assigned
+			driver = frappe.db.get_value("Vehicle", assigned, "custom_assigned_driver")
+			if driver:
+				new_trip.driver = driver
+
+		for row in chunk:
+			new_trip.append("custom_trip_items", _row_values(row))
+
+		new_trip.insert()
+		created.append(new_trip.name)
+
+	frappe.msgprint(
+		_("{0} kept {1}. {2} further trip(s) created: {3}").format(
+			get_link_to_form("Delivery Trip", doc.name),
+			flt(sum(stock_qty(row) for row in loads[0]), 2),
+			len(created),
+			", ".join(get_link_to_form("Delivery Trip", name) for name in created),
+		),
+		indicator="green",
+		title=_("Trip Split"),
+	)
+
+	return created
+
+
+def _trip_header(doc):
+	"""Header values a follow-on trip inherits. Vehicle and driver deliberately
+	excluded — each new trip needs its own truck."""
+	fields = (
+		"company",
+		"departure_time",
+		"custom_sales_order",
+		"custom_delivery_location",
+		"custom_loading_warehouse",
+		"custom_trip_type",
+		"custom_external_transporter",
+		"custom_transportation_charge_item",
+		"custom_trip_purpose",
+		"custom_purchase_order",
+	)
+	meta = doc.meta
+	return {
+		field: doc.get(field)
+		for field in fields
+		if meta.has_field(field) and doc.get(field) is not None
+	}
+
+
+def _row_values(row):
+	"""Copy a planned row, dropping anything that belongs to the old parent or
+	to a delivery that has not happened yet."""
+	drop = {
+		"name", "parent", "parentfield", "parenttype", "idx", "owner",
+		"creation", "modified", "modified_by", "docstatus",
+		"delivered_qty", "delivery_note", "delivery_note_item",
+		"purchase_receipt", "purchase_receipt_item",
+	}
+	source = row.as_dict() if hasattr(row, "as_dict") else dict(row)
+	return {key: value for key, value in source.items() if key not in drop}
+
+
+# ---------------------------------------------------------------------------
+# Document events
+# ---------------------------------------------------------------------------
+
+
+def trip_on_change(doc, method=None):
+	"""Keep the truck's Available Qty in step after any trip movement."""
+	for vehicle in {doc.get("vehicle"), (doc.get_doc_before_save() or {}).get("vehicle")}:
+		if vehicle:
+			refresh_vehicle_load(vehicle)
+
+
+def trip_after_submit_or_cancel(doc, method=None):
+	if doc.get("vehicle"):
+		refresh_vehicle_load(doc.vehicle)
+
+
+def vehicle_on_update(doc, method=None):
+	"""Capacity changed, or the truck was just created — recount."""
+	refresh_vehicle_load(doc.name)
+
+
+@frappe.whitelist()
+def rebuild_all_vehicle_loads():
+	"""One-off repair, and the after_migrate entry point."""
+	names = frappe.get_all("Vehicle", pluck="name")
+	for name in names:
+		refresh_vehicle_load(name)
+	frappe.db.commit()
+	return len(names)
