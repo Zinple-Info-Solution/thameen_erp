@@ -32,8 +32,10 @@ frappe.ui.form.on("Delivery Trip", {
 			filters: { docstatus: 1, status: ["not in", ["Closed", "Completed", "Cancelled"]] },
 		}));
 		frm.set_query("vehicle", () => ({
-			 filters: { custom_status: "Available" },
-	 }));
+    filters: {
+        custom_status: ["in", ["Available", "Assigned"]],
+    },
+}));
 
 		// Freight is a service charge — a stock item here is rejected server-side.
 		frm.set_query("custom_transportation_item", () => ({
@@ -44,6 +46,8 @@ frappe.ui.form.on("Delivery Trip", {
 	refresh(frm) {
 		if (frm.doc.docstatus === 0) {
 			add_get_items_button(frm);
+			add_load_buttons(frm);
+			check_vehicle_load(frm, { prompt: false });
 			return;
 		}
 		if (frm.doc.docstatus !== 1) return;
@@ -51,6 +55,7 @@ frappe.ui.form.on("Delivery Trip", {
 		add_status_buttons(frm);
 		show_progress(frm);
 		add_view_buttons(frm);
+		check_vehicle_load(frm, { prompt: false });
 	},
 
 	vehicle(frm) {
@@ -69,17 +74,9 @@ frappe.ui.form.on("Delivery Trip", {
 				if (message.last_odometer && !frm.doc.custom_starting_odometer) {
 					frm.set_value("custom_starting_odometer", message.last_odometer);
 				}
-				const planned = total_planned(frm);
-				if (message.custom_capacity && planned > message.custom_capacity) {
-					frm.dashboard.add_comment(
-						__("Planned {0} exceeds this vehicle's capacity of {1}.", [
-							planned,
-							message.custom_capacity,
-						]),
-						"orange",
-						true
-					);
-				}
+				// The full load check replaces the old capacity-only comment:
+				// it also accounts for what other open trips already hold.
+				check_vehicle_load(frm, { prompt: true });
 			});
 	},
 
@@ -299,4 +296,258 @@ function show_progress(frm) {
 				frm.doc.status === "Completed" ? "progress-bar-success" : "progress-bar-info",
 		},
 	]);
+}
+
+// ---------------------------------------------------------------------------
+// Vehicle load: does this trip actually fit on the chosen truck?
+//
+// Two numbers matter and they are not the same. Capacity is the truck's rating
+// and never moves. Available is what is left once the loads already committed
+// to that truck on other open trips are taken off. Planning against capacity
+// when 180 of 300 is already spoken for is how trucks get double-booked.
+// ---------------------------------------------------------------------------
+
+function check_vehicle_load(frm, opts) {
+	opts = opts || {};
+	if (!frm.doc.vehicle || frm.doc.docstatus > 1) return;
+
+	frappe.call({
+		method: "thameen_erp.overrides.vehicle_load.get_vehicle_load",
+		args: { vehicle: frm.doc.vehicle, trip: frm.doc.name },
+		callback({ message }) {
+			if (!message || !message.has_capacity) {
+				if (opts.prompt && message && !message.has_capacity) {
+					frm.dashboard.add_comment(
+						__("{0} has no Capacity set, so the load cannot be checked.", [frm.doc.vehicle]),
+						"orange",
+						true
+					);
+				}
+				return;
+			}
+
+			render_load_indicator(frm, message);
+
+			if (!message.fits && opts.prompt && frm.doc.docstatus === 0) {
+				offer_split(frm, message);
+			}
+		},
+	});
+}
+
+function render_load_indicator(frm, load) {
+	const colour = load.fits ? "green" : "red";
+	const parts = [
+		__("Capacity {0}", [format_number(load.capacity)]),
+		__("committed {0}", [format_number(load.committed_qty)]),
+		__("available {0}", [format_number(load.available_qty)]),
+		__("this trip {0}", [format_number(load.planned_qty)]),
+	];
+
+	frm.dashboard.add_comment(
+		`${frm.doc.vehicle}: ${parts.join(" · ")}` +
+			(load.fits ? "" : ` — ${__("over by {0}", [format_number(load.overflow_qty)])}`),
+		colour,
+		true
+	);
+}
+
+function offer_split(frm, load) {
+	const committed_rows = (load.committed_trips || [])
+		.map(
+			(trip) =>
+				`<tr><td>${frappe.utils.get_form_link("Delivery Trip", trip.name, true)}</td>
+				 <td>${__(trip.status)}</td>
+				 <td class="text-right">${format_number(trip.qty)}</td></tr>`
+		)
+		.join("");
+
+	const why = committed_rows
+		? `<p class="text-muted small">${__("Already committed to this truck:")}</p>
+		   <table class="table table-bordered small">
+		     <thead><tr><th>${__("Trip")}</th><th>${__("Status")}</th><th class="text-right">${__("Qty")}</th></tr></thead>
+		     <tbody>${committed_rows}</tbody>
+		   </table>`
+		: "";
+
+	const summary = `
+		<p>${__("{0} cannot carry this trip in one go.", [frm.doc.vehicle])}</p>
+		<table class="table table-bordered">
+			<tbody>
+				<tr><td>${__("Rated capacity")}</td><td class="text-right">${format_number(load.capacity)}</td></tr>
+				<tr><td>${__("Already committed")}</td><td class="text-right">${format_number(load.committed_qty)}</td></tr>
+				<tr><td><b>${__("Free right now")}</b></td><td class="text-right"><b>${format_number(load.available_qty)}</b></td></tr>
+				<tr><td>${__("This trip needs")}</td><td class="text-right">${format_number(load.planned_qty)}</td></tr>
+				<tr><td><b>${__("Over by")}</b></td><td class="text-right"><b>${format_number(load.overflow_qty)}</b></td></tr>
+			</tbody>
+		</table>
+		${why}`;
+
+	const dialog = new frappe.ui.Dialog({
+		title: __("Not Enough Room"),
+		size: "large",
+		fields: [
+			{ fieldtype: "HTML", fieldname: "summary", options: summary },
+			{
+				fieldname: "use_capacity",
+				fieldtype: "Check",
+				label: __("Ignore what is committed and plan against full capacity"),
+				description: __(
+					"Tick this if the other trips will be finished before this one loads. The first trip then takes a full truckload instead of only the free space."
+				),
+			},
+			{ fieldtype: "Section Break" },
+			{ fieldtype: "HTML", fieldname: "plan" },
+		],
+		primary_action_label: __("Split into Several Trips"),
+		primary_action() {
+			const use_capacity = dialog.get_value("use_capacity") ? 1 : 0;
+			frappe.call({
+				method: "thameen_erp.overrides.vehicle_load.split_trip",
+				args: {
+					trip: frm.doc.name,
+					vehicle: frm.doc.vehicle,
+					use_capacity,
+					assignments: JSON.stringify(collect_assignments(dialog)),
+				},
+				freeze: true,
+				freeze_message: __("Splitting…"),
+				callback() {
+					dialog.hide();
+					frm.reload_doc();
+				},
+			});
+		},
+		secondary_action_label: __("Keep as One Trip"),
+		secondary_action() {
+			dialog.hide();
+			frappe.show_alert({
+				message: __("Left as one trip. It will still submit — the overload is a warning, not a block."),
+				indicator: "orange",
+			});
+		},
+	});
+
+	dialog.fields_dict.use_capacity.$input.on("change", () => refresh_plan(frm, dialog));
+	dialog.show();
+	refresh_plan(frm, dialog);
+}
+
+function refresh_plan(frm, dialog) {
+	const wrapper = dialog.fields_dict.plan.$wrapper;
+	wrapper.html(`<p class="text-muted">${__("Working out the split…")}</p>`);
+
+	frappe.call({
+		method: "thameen_erp.overrides.vehicle_load.preview_split",
+		args: {
+			trip: frm.doc.name,
+			vehicle: frm.doc.vehicle,
+			use_capacity: dialog.get_value("use_capacity") ? 1 : 0,
+		},
+		callback({ message }) {
+			if (!message || !message.loads) {
+				wrapper.html(`<p class="text-muted">${__("Nothing to split.")}</p>`);
+				return;
+			}
+
+			const rows = message.loads
+				.map((load, index) => {
+					const items = load.items
+						.map(
+							(item) =>
+								`${frappe.utils.escape_html(item.item_code)} — ${format_number(item.qty)} ${frappe.utils.escape_html(item.uom || "")}`
+						)
+						.join("<br>");
+					const label =
+						index === 0
+							? `<b>${__("This trip")}</b><br><span class="text-muted small">${frm.doc.name}</span>`
+							: `<b>${__("New trip {0}", [index + 1])}</b>`;
+					const picker =
+						index === 0
+							? `<span class="text-muted small">${frappe.utils.escape_html(frm.doc.vehicle)}</span>`
+							: `<input class="form-control input-xs split-vehicle" data-index="${index - 1}"
+							     placeholder="${__("optional")}" style="min-width:120px">`;
+					return `<tr>
+						<td>${label}</td>
+						<td>${items}</td>
+						<td class="text-right">${format_number(load.total_qty)}</td>
+						<td>${picker}</td>
+					</tr>`;
+				})
+				.join("");
+
+			wrapper.html(`
+				<p>${__("{0} trip(s) in total. The follow-on trips are created as drafts.", [message.trip_count])}</p>
+				<table class="table table-bordered">
+					<thead><tr>
+						<th style="width:22%">${__("Trip")}</th>
+						<th>${__("Items")}</th>
+						<th class="text-right" style="width:12%">${__("Qty")}</th>
+						<th style="width:22%">${__("Vehicle")}</th>
+					</tr></thead>
+					<tbody>${rows}</tbody>
+				</table>
+				<p class="text-muted small">${__(
+					"Leave a vehicle blank to let the dispatcher choose later. Delivery location, warehouse and freight settings are copied from this trip."
+				)}</p>`);
+
+			wrapper.find(".split-vehicle").each(function () {
+				const $input = $(this);
+				$input.autocomplete({
+					minLength: 0,
+					source(request, response) {
+						frappe.call({
+							method: "frappe.client.get_list",
+							args: {
+								doctype: "Vehicle",
+								filters: { custom_status: ["in", ["Available", "Assigned"]] },
+								fields: ["name", "custom_available_qty"],
+								limit_page_length: 20,
+							},
+							callback({ message: vehicles }) {
+								response(
+									(vehicles || []).map((v) => ({
+										label: `${v.name} (${__("free")} ${format_number(v.custom_available_qty)})`,
+										value: v.name,
+									}))
+								);
+							},
+						});
+					},
+				});
+			});
+		},
+	});
+}
+
+function collect_assignments(dialog) {
+	const out = [];
+	dialog.$wrapper.find(".split-vehicle").each(function () {
+		out[parseInt($(this).data("index"), 10)] = $(this).val() || null;
+	});
+	return out;
+}
+
+function add_load_buttons(frm) {
+	if (!frm.doc.vehicle || frm.is_new()) return;
+
+	frm.add_custom_button(__("Check Load"), () => check_vehicle_load(frm, { prompt: true }));
+
+	frm.add_custom_button(__("Split Into Trips"), () => {
+		frappe.call({
+			method: "thameen_erp.overrides.vehicle_load.get_vehicle_load",
+			args: { vehicle: frm.doc.vehicle, trip: frm.doc.name },
+			callback({ message }) {
+				if (!message || !message.has_capacity) {
+					frappe.msgprint(
+						__("Set a Capacity on {0} before splitting.", [frm.doc.vehicle])
+					);
+					return;
+				}
+				// Deliberately offered even when it fits: a dispatcher may want
+				// two half-loaded trucks going out together rather than one.
+				offer_split(frm, message);
+			},
+		});
+	});
 }

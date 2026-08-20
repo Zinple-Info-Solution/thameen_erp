@@ -48,7 +48,16 @@ doc_events = {
 	"Vehicle": {
 		"validate": "thameen_erp.overrides.vehicle.validate",
 		"after_insert": "thameen_erp.overrides.vehicle.after_insert",
-		"on_update": "thameen_erp.overrides.vehicle.on_update",
+		"on_update": [
+			"thameen_erp.overrides.vehicle.on_update",
+			"thameen_erp.overrides.vehicle_load.vehicle_on_update",
+		],
+	},
+	"Delivery Trip": {
+		"on_update": "thameen_erp.overrides.vehicle_load.trip_on_change",
+		"on_submit": "thameen_erp.overrides.vehicle_load.trip_after_submit_or_cancel",
+		"on_cancel": "thameen_erp.overrides.vehicle_load.trip_after_submit_or_cancel",
+		"on_update_after_submit": "thameen_erp.overrides.vehicle_load.trip_after_submit_or_cancel",
 	},
 	"Driver": {
 		"on_update": "thameen_erp.overrides.driver.on_update",

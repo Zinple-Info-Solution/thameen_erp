@@ -52,12 +52,29 @@ def after_install():
 	install_customisations()
 	create_roles()
 	create_workflow()
+	rebuild_vehicle_loads()
 
 
 def after_migrate():
 	install_customisations()
 	create_roles()
 	create_workflow()
+	rebuild_vehicle_loads()
+
+
+def rebuild_vehicle_loads():
+	"""Recount Committed / Available on every truck.
+
+	Runs on install and on every migrate so the figures are right from the
+	first page load, including on sites whose trips predate these fields.
+	"""
+	from thameen_erp.overrides.vehicle_load import refresh_vehicle_load
+
+	for name in frappe.get_all("Vehicle", pluck="name"):
+		try:
+			refresh_vehicle_load(name)
+		except Exception:
+			frappe.log_error(frappe.get_traceback(), f"Vehicle load rebuild: {name}")
 
 
 # ---------------------------------------------------------------------------
@@ -156,9 +173,28 @@ def get_custom_fields() -> dict:
 				"insert_after": "custom_capacity",
 			},
 			{
+				"fieldname": "custom_committed_qty",
+				"label": "Committed Qty",
+				"fieldtype": "Float",
+				"read_only": 1,
+				"no_copy": 1,
+				"insert_after": "custom_capacity_uom",
+				"description": "On submitted trips that are Scheduled, Loading or In Transit.",
+			},
+			{
+				"fieldname": "custom_available_qty",
+				"label": "Available Qty",
+				"fieldtype": "Float",
+				"read_only": 1,
+				"no_copy": 1,
+				"in_list_view": 1,
+				"insert_after": "custom_committed_qty",
+				"description": "Capacity less what is already committed. Recounted from the trips, never incremented.",
+			},
+			{
 				"fieldname": "custom_fleet_col_break",
 				"fieldtype": "Column Break",
-				"insert_after": "custom_capacity_uom",
+				"insert_after": "custom_available_qty",
 			},
 			{
 				"fieldname": "custom_status",
