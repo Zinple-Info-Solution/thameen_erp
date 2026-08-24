@@ -1,0 +1,193 @@
+{
+ "actions": [],
+ "creation": "2026-08-05 10:00:00.000000",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "sec_rev",
+  "transportation_item",
+  "transportation_income_account",
+  "col1",
+  "cement_income_account",
+  "default_company",
+  "default_cement_supplier",
+  "allow_over_capacity_manual_load",
+  "sec_ops",
+  "auto_create_delivery_trip",
+  "auto_close_sales_order",
+  "require_pod_before_complete",
+  "one_item_per_trip",
+  "col2",
+  "document_expiry_reminder_days",
+  "credit_note_overdue_days",
+  "sec_notify",
+  "notify_roles"
+ ],
+ "fields": [
+  {
+   "fieldname": "sec_rev",
+   "fieldtype": "Section Break",
+   "label": "Revenue Split"
+  },
+  {
+   "fieldname": "transportation_item",
+   "fieldtype": "Link",
+   "label": "Transportation Charge Item",
+   "options": "Item",
+   "description": "Service item used for the freight line on consolidated invoices."
+  },
+  {
+   "fieldname": "transportation_income_account",
+   "fieldtype": "Link",
+   "label": "Transportation Revenue Account",
+   "options": "Account"
+  },
+  {
+   "fieldname": "col1",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "cement_income_account",
+   "fieldtype": "Link",
+   "label": "Cement Sales Revenue Account",
+   "options": "Account"
+  },
+  {
+   "fieldname": "default_company",
+   "fieldtype": "Link",
+   "label": "Default Company",
+   "options": "Company"
+  },
+  {
+   "fieldname": "sec_ops",
+   "fieldtype": "Section Break",
+   "label": "Operations"
+  },
+  {
+   "fieldname": "auto_create_delivery_trip",
+   "fieldtype": "Check",
+   "label": "Auto-create Delivery Trips on Sales Order submit",
+   "default": "1",
+   "description": "One draft trip per delivery location, containing every pending line for that site. Vehicle and driver are assigned by dispatch."
+  },
+  {
+   "fieldname": "auto_close_sales_order",
+   "fieldtype": "Check",
+   "label": "Auto-close Sales Order on full delivery",
+   "default": "1"
+  },
+  {
+   "fieldname": "require_pod_before_complete",
+   "fieldtype": "Check",
+   "label": "Require POD before completing a trip",
+   "default": "1"
+  },
+  {
+   "fieldname": "col2",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "document_expiry_reminder_days",
+   "fieldtype": "Int",
+   "label": "Document Expiry Reminder (Days)",
+   "default": "30"
+  },
+  {
+   "fieldname": "credit_note_overdue_days",
+   "fieldtype": "Int",
+   "label": "Credit Note Overdue After (Days)",
+   "default": "45"
+  },
+  {
+   "fieldname": "sec_notify",
+   "fieldtype": "Section Break",
+   "label": "Notifications"
+  },
+  {
+   "fieldname": "notify_roles",
+   "fieldtype": "Small Text",
+   "label": "Notify Roles",
+   "default": "Fleet Manager\nOperation Manager",
+   "description": "One role per line. Used for expiry and service-due alerts."
+  },
+  {
+   "fieldname": "one_item_per_trip",
+   "fieldtype": "Check",
+   "label": "One Item per Trip",
+   "default": "1",
+   "description": "A truck carries one cement type at a time. Trips are planned per site AND per item, and a trip with two different items cannot be submitted."
+  },
+  {
+   "fieldname": "default_cement_supplier",
+   "fieldtype": "Link",
+   "label": "Default Cement Supplier",
+   "options": "Supplier",
+   "description": "Pre-selected when a Purchase Order is raised for a stock shortfall or a direct-from-supplier trip."
+  },
+  {
+   "fieldname": "allow_over_capacity_manual_load",
+   "fieldtype": "Check",
+   "label": "Allow Manual Loading Above Capacity",
+   "default": "1",
+   "description": "When ticked, loading a truck past its rated Capacity from the Vehicle form warns and asks for confirmation. When unticked it is refused."
+  }
+ ],
+ "index_web_pages_for_search": 1,
+ "links": [],
+ "modified": "2026-08-21 10:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "Thameen ERP",
+ "name": "Thameen Fleet Settings",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "role": "System Manager",
+   "read": 1,
+   "write": 1,
+   "create": 1,
+   "delete": 1,
+   "submit": 0,
+   "cancel": 0,
+   "amend": 0,
+   "report": 1,
+   "export": 1,
+   "share": 1,
+   "print": 1,
+   "email": 1
+  },
+  {
+   "role": "Fleet Manager",
+   "read": 1,
+   "write": 1,
+   "create": 1,
+   "delete": 0,
+   "submit": 0,
+   "cancel": 0,
+   "amend": 0,
+   "report": 1,
+   "export": 1,
+   "share": 1,
+   "print": 1,
+   "email": 1
+  },
+  {
+   "role": "Accounts Manager",
+   "read": 1,
+   "write": 1,
+   "create": 1,
+   "delete": 0,
+   "submit": 0,
+   "cancel": 0,
+   "amend": 0,
+   "report": 1,
+   "export": 1,
+   "share": 1,
+   "print": 1,
+   "email": 1
+  }
+ ],
+ "sort_field": "creation",
+ "sort_order": "DESC",
+ "states": [],
+ "issingle": 1
+}
