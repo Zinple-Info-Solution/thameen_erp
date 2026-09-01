@@ -36,6 +36,16 @@ VEHICLE_STATUS = "\n".join(
 	["Available", "Assigned", "On Trip", "Under Maintenance", "Out of Service"]
 )
 
+# A trip is one of four journeys. Kept in sync with ROUTE_MAP in
+# thameen_erp.overrides.delivery_trip — change both together.
+TRIP_ROUTES = [
+	"",
+	"Warehouse to Customer",
+	"Supplier to Customer",
+	"Supplier to Warehouse",
+	"Supplier to Decide After Loading",
+]
+
 CREDIT_NOTE_STATUS = "\n".join(
 	[
 		"Not Applicable",
@@ -382,16 +392,30 @@ def get_custom_fields() -> dict:
 				"fieldtype": "Section Break",
 				"insert_after": "vehicle",
 			},
+			# The route in one field. Supply Source and Destination are still the
+			# fields every rule reads; this drives both so a dispatcher picks the
+			# journey once instead of getting the pair wrong.
+			{
+				"fieldname": "custom_trip_route",
+				"label": "Trip Route",
+				"fieldtype": "Select",
+				"options": "\n".join(TRIP_ROUTES),
+				"in_standard_filter": 1,
+				"in_list_view": 1,
+				"allow_on_submit": 1,
+				"description": "Sets Supply Source and Destination together.",
+				"insert_after": "custom_trip_section",
+			},
 			{
 				"fieldname": "custom_sales_order",
 				"label": "Sales Order",
 				"fieldtype": "Link",
 				"options": "Sales Order",
 				"allow_on_submit": 1,
-				"allow_on_submit": 1,
 				"read_only": 1,
+				"in_standard_filter": 1,
 				"description": "Set automatically from the trip rows when they all belong to one order.",
-				"insert_after": "custom_trip_section",
+				"insert_after": "custom_trip_route",
 			},
 			{
 				"fieldname": "custom_delivery_location",
@@ -410,6 +434,19 @@ def get_custom_fields() -> dict:
 				"description": "Default source for every row. A row may override it.",
 				"insert_after": "custom_delivery_location",
 			},
+			# Where the cement ends up while it is on the road. Read-only: it is
+			# the truck's own warehouse, created with the Vehicle.
+			{
+				"fieldname": "custom_vehicle_warehouse",
+				"label": "Vehicle Warehouse",
+				"fieldtype": "Link",
+				"options": "Warehouse",
+				"read_only": 1,
+				"allow_on_submit": 1,
+				"fetch_from": "vehicle.custom_vehicle_warehouse",
+				"description": "Stock moves here at Loading and leaves it at Delivered.",
+				"insert_after": "custom_loading_warehouse",
+			},
 			# Legacy single-item fields. Kept (never dropped — dropping loses the
 			# column) but now read-only summaries derived from the trip rows.
 			{
@@ -420,13 +457,16 @@ def get_custom_fields() -> dict:
 				"read_only": 1,
 				"allow_on_submit": 1,
 				"description": "Summary only — set when the trip carries a single item.",
-				"insert_after": "custom_loading_warehouse",
+				"insert_after": "custom_vehicle_warehouse",
 			},
+			# Hidden, not deleted: the column still feeds old reports and the
+			# legacy-row migration. Dropping a Custom Field drops its column.
 			{
 				"fieldname": "custom_planned_qty",
 				"label": "Total Planned Qty",
 				"fieldtype": "Float",
 				"read_only": 1,
+				"hidden": 1,
 				"allow_on_submit": 1,
 				"insert_after": "custom_item",
 			},
@@ -441,7 +481,7 @@ def get_custom_fields() -> dict:
 			{
 				"fieldname": "custom_trip_col_break",
 				"fieldtype": "Column Break",
-				"insert_after": "custom_loading_warehouse",
+				"insert_after": "custom_delivered_qty",
 			},
 			{
 				"fieldname": "custom_trip_type",
@@ -468,7 +508,8 @@ def get_custom_fields() -> dict:
 				"fieldtype": "Select",
 				"options": "Own Warehouse\nDirect from Supplier",
 				"default": "Own Warehouse",
-				"in_standard_filter": 1,
+				"read_only": 1,
+				"description": "Driven by Trip Route.",
 				"insert_after": "custom_external_transporter",
 			},
 			{
@@ -486,6 +527,7 @@ def get_custom_fields() -> dict:
 				"fieldtype": "Link",
 				"options": "Purchase Order",
 				"allow_on_submit": 1,
+				"in_standard_filter": 1,
 				"depends_on": "eval:doc.custom_supply_source=='Direct from Supplier' || doc.custom_purchase_order",
 				"description": "Supplier order this trip collects against. Must be submitted before the trip can be loaded.",
 				"insert_after": "custom_supplier",
@@ -498,10 +540,9 @@ def get_custom_fields() -> dict:
 				"fieldtype": "Select",
 				"options": "Customer\nOwn Warehouse\nDecide After Loading",
 				"default": "Customer",
-				"in_standard_filter": 1,
-				"in_list_view": 1,
+				"read_only": 1,
 				"allow_on_submit": 1,
-				"description": "Decide After Loading (direct-supply trips only): collect from the supplier first, choose customer or own warehouse while the truck is on the road.",
+				"description": "Driven by Trip Route. Changed in-flight by the Destination buttons.",
 				"insert_after": "custom_supply_source",
 			},
 			# Where this trip came from — filterable in the list view.
@@ -512,8 +553,6 @@ def get_custom_fields() -> dict:
 				"options": "\nSales Order\nPurchase Order\nManual",
 				"read_only": 1,
 				"no_copy": 1,
-				"in_standard_filter": 1,
-				"in_list_view": 1,
 				"insert_after": "custom_destination_type",
 			},
 			{
@@ -525,7 +564,7 @@ def get_custom_fields() -> dict:
 				"depends_on": "eval:doc.custom_destination_type=='Own Warehouse'",
 				"mandatory_depends_on": "eval:doc.custom_destination_type=='Own Warehouse'",
 				"description": "Yard warehouse the cement is unloaded into at Delivered.",
-				"insert_after": "custom_destination_type",
+				"insert_after": "custom_trip_source",
 			},
 			{
 				"fieldname": "custom_purchase_receipt",
@@ -538,11 +577,41 @@ def get_custom_fields() -> dict:
 				"depends_on": "custom_purchase_receipt",
 				"insert_after": "custom_purchase_order",
 			},
+			# Actual clock times, stamped by the status buttons and correctable
+			# afterwards. `departure_time` stays the PLANNED time; these two are
+			# what really happened, which is what the list view and the trip
+			# reports need.
+			{
+				"fieldname": "custom_trip_start",
+				"label": "Trip Start",
+				"fieldtype": "Datetime",
+				"allow_on_submit": 1,
+				"in_standard_filter": 1,
+				"description": "Stamped when the trip is marked Loading. Editable.",
+				"insert_after": "custom_purchase_receipt",
+			},
+			{
+				"fieldname": "custom_trip_end",
+				"label": "Trip End",
+				"fieldtype": "Datetime",
+				"allow_on_submit": 1,
+				"description": "Stamped when the trip is marked Delivered. Editable.",
+				"insert_after": "custom_trip_start",
+			},
+			{
+				"fieldname": "custom_trip_duration_hours",
+				"label": "Trip Duration (Hours)",
+				"fieldtype": "Float",
+				"precision": "2",
+				"read_only": 1,
+				"allow_on_submit": 1,
+				"insert_after": "custom_trip_end",
+			},
 			{
 				"fieldname": "custom_starting_odometer",
 				"label": "Starting Odometer",
 				"fieldtype": "Int",
-				"insert_after": "custom_purchase_receipt",
+				"insert_after": "custom_trip_duration_hours",
 			},
 			{
 				"fieldname": "custom_ending_odometer",
@@ -1007,8 +1076,19 @@ def _apply_property_setters():
 		("Delivery Trip", "driver", "in_standard_filter", "1", "Check"),
 		("Delivery Trip", "driver_name", "in_list_view", "0", "Check"),
 		("Delivery Trip", "status", "in_standard_filter", "1", "Check"),
-		("Delivery Trip", "departure_time", "in_list_view", "1", "Check"),
-		("Delivery Trip", None, "search_fields", "vehicle,driver,status", "Data"),
+		# The list now carries the actual clock times instead of the planned
+		# departure — dispatch asks "when did it go out and come back", not
+		# "when was it meant to".
+		("Delivery Trip", "departure_time", "in_list_view", "0", "Check"),
+		("Delivery Trip", "custom_trip_start", "in_list_view", "1", "Check"),
+		("Delivery Trip", "custom_trip_end", "in_list_view", "1", "Check"),
+		(
+			"Delivery Trip",
+			None,
+			"search_fields",
+			"vehicle,driver,status,custom_sales_order,custom_purchase_order",
+			"Data",
+		),
 	]
 	for doctype, fieldname, prop, value, prop_type in setters:
 		try:

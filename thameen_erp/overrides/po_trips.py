@@ -472,6 +472,7 @@ def redirect_trip(trip, destination, sales_order=None, target_warehouse=None, de
 
 		updates = {
 			"custom_destination_type": "Customer",
+			"custom_trip_route": "Supplier to Customer",
 			"custom_trip_source": doc.get("custom_trip_source") or ("Purchase Order" if doc.get("custom_purchase_order") else "Manual"),
 			"custom_sales_order": sales_order,
 			"custom_target_warehouse": None,
@@ -512,6 +513,7 @@ def redirect_trip(trip, destination, sales_order=None, target_warehouse=None, de
 		doc.db_set(
 			{
 				"custom_destination_type": "Own Warehouse",
+				"custom_trip_route": "Supplier to Warehouse",
 				"custom_target_warehouse": target_warehouse,
 				"custom_sales_order": None,
 				"custom_delivery_location": target_warehouse,

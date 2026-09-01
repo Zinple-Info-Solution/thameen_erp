@@ -1,4 +1,12 @@
 frappe.ui.form.on("Customer Requirement", {
+	setup(frm) {
+		// Only stock items can be trucked. Services and non-stock items have no
+		// Bin, so they would break every availability check downstream.
+		frm.set_query("item_code", "items", () => ({
+			filters: { is_stock_item: 1, disabled: 0 },
+		}));
+	},
+
 	refresh(frm) {
 		render_credit_banner(frm);
 

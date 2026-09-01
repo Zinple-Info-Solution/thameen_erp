@@ -7,9 +7,34 @@ from frappe.utils import flt, now_datetime
 
 class CustomerRequirement(Document):
 	def validate(self):
+		self.validate_stock_items()
 		self.calculate_totals()
 		self.run_credit_check()
 		self.stamp_approvals()
+
+	def validate_stock_items(self):
+		"""Only stock items can be trucked.
+
+		The form filters the picker, but a requirement can also arrive from an
+		import or the API, and a non-stock item has no Bin — every availability
+		check downstream would read zero and quietly mislead.
+		"""
+		codes = [row.item_code for row in self.items if row.item_code]
+		if not codes:
+			return
+
+		non_stock = frappe.get_all(
+			"Item",
+			filters={"name": ("in", codes), "is_stock_item": 0},
+			pluck="name",
+		)
+		if non_stock:
+			frappe.throw(
+				_("{0} do not maintain stock and cannot be delivered by truck.").format(
+					", ".join(frappe.bold(code) for code in non_stock)
+				),
+				title=_("Non-Stock Item"),
+			)
 
 	def calculate_totals(self):
 		self.total_qty = sum(flt(row.qty) for row in self.items)

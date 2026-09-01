@@ -33,7 +33,7 @@ import json
 
 import frappe
 from frappe import _
-from frappe.utils import cint, flt, get_link_to_form
+from frappe.utils import cint, flt, get_link_to_form, getdate
 
 from thameen_erp.overrides.trip_split import (
 	QTY_TOLERANCE,
@@ -51,8 +51,19 @@ COMMITTED_STATES = ("Scheduled", "Loading", "In Transit")
 # ---------------------------------------------------------------------------
 
 
-def get_committed_qty(vehicle, exclude_trip=None):
-	"""Stock-UOM qty sitting on, or promised to, this truck right now."""
+def get_committed_qty(vehicle, exclude_trip=None, on_date=None):
+	"""Stock-UOM qty promised to this truck.
+
+	Capacity is a per-JOURNEY limit, not a pool spread over the calendar. A
+	20-tonne truck doing 10 on Monday and 10 on Friday is not carrying 20 at
+	once, and refusing the Friday trip because Monday exists is wrong.
+
+	Pass `on_date` to count only the trips that share that departure date —
+	those are the ones that genuinely compete for the same space. Trips with no
+	departure date set are always counted, since they could be any day.
+
+	Leave `on_date` out for the total across every open trip.
+	"""
 	if not vehicle:
 		return 0.0
 
@@ -62,6 +73,10 @@ def get_committed_qty(vehicle, exclude_trip=None):
 	if exclude_trip:
 		conditions.append("t.name != %(exclude)s")
 		values["exclude"] = exclude_trip
+
+	if on_date:
+		conditions.append("(t.departure_time is null or date(t.departure_time) = %(on_date)s)")
+		values["on_date"] = getdate(on_date)
 
 	result = frappe.db.sql(
 		f"""
@@ -76,6 +91,39 @@ def get_committed_qty(vehicle, exclude_trip=None):
 	return flt(result[0][0]) if result and result[0] else 0.0
 
 
+def get_peak_committed_qty(vehicle, exclude_trip=None):
+	"""The busiest single day's promise on this truck.
+
+	The right headline number for "how loaded is this vehicle": summing every
+	open trip would report a truck booked for ten separate days as ten times
+	overloaded.
+	"""
+	if not vehicle:
+		return 0.0
+
+	conditions = ["t.vehicle = %(vehicle)s", "t.docstatus = 1", "t.status in %(states)s"]
+	values = {"vehicle": vehicle, "states": COMMITTED_STATES}
+
+	if exclude_trip:
+		conditions.append("t.name != %(exclude)s")
+		values["exclude"] = exclude_trip
+
+	rows = frappe.db.sql(
+		f"""
+		select date(t.departure_time) as day,
+		       sum(ifnull(i.qty, 0) * ifnull(nullif(i.conversion_factor, 0), 1)) as qty
+		from `tabDelivery Trip Item` i
+		inner join `tabDelivery Trip` t on t.name = i.parent
+		where {" and ".join(conditions)}
+		group by date(t.departure_time)
+		""",
+		values,
+		as_dict=True,
+	)
+
+	return max((flt(r.qty) for r in rows), default=0.0)
+
+
 def refresh_vehicle_load(vehicle):
 	"""Recompute and store Committed / Available on the Vehicle.
 
@@ -86,18 +134,17 @@ def refresh_vehicle_load(vehicle):
 		return
 
 	capacity = flt(frappe.db.get_value("Vehicle", vehicle, "custom_capacity"))
-	committed = get_committed_qty(vehicle)
+	# Peak day, not the sum of every open trip — see get_peak_committed_qty.
+	committed = get_peak_committed_qty(vehicle)
 
 	# Physical stock in the vehicle warehouse, read from Bin right now.
 	from thameen_erp.overrides.vehicle_stock import get_truck_stock
 
 	on_truck = sum(get_truck_stock(vehicle).values())
 
-	# Room left is capacity less whichever is larger: what is promised to the
-	# truck or what is physically on it. A hand-loaded truck with no trips is
-	# therefore NOT shown as fully free.
-	used = max(committed, on_truck)
-	available = max(capacity - used, 0.0) if capacity else 0.0
+	# Room left is capacity less whichever is larger, promised or physically
+	# present. `max`, not the sum: a loaded trip appears in both.
+	available = max(capacity - max(committed, on_truck), 0.0) if capacity else 0.0
 
 	frappe.db.set_value(
 		"Vehicle",
@@ -118,11 +165,19 @@ def get_vehicle_load(vehicle, trip=None):
 		return {}
 
 	capacity = flt(frappe.get_cached_value("Vehicle", vehicle, "custom_capacity"))
-	committed = get_committed_qty(vehicle, exclude_trip=trip)
-	available = max(capacity - committed, 0.0) if capacity else 0.0
-	# Note: the form's fit check is against what is PROMISED. Stock this very
-	# trip will consume from the truck is not "used" space, so physical stock
-	# is reported alongside (on_truck_qty) rather than subtracted here.
+
+	# Only the trips sharing this one's departure date compete for the space.
+	on_date = frappe.db.get_value("Delivery Trip", trip, "departure_time") if trip else None
+	committed = get_committed_qty(vehicle, exclude_trip=trip, on_date=on_date)
+
+	# Space is capacity less whichever is larger: promised, or physically in
+	# the truck warehouse. A truck rated 20 carrying 10 has 10 free even if no
+	# trip claims that 10. `max` rather than the sum, because a trip that has
+	# already loaded is counted in both.
+	from thameen_erp.overrides.vehicle_stock import get_truck_stock
+
+	on_truck_now = sum(get_truck_stock(vehicle).values())
+	available = max(capacity - max(committed, on_truck_now), 0.0) if capacity else 0.0
 
 	planned = 0.0
 	if trip and frappe.db.exists("Delivery Trip", trip):
@@ -218,21 +273,116 @@ def preview_split(trip, vehicle=None, use_capacity=0):
 		"loads": describe_loads(loads),
 		"trip_count": len(loads),
 		"departure_time": doc.get("departure_time"),
-		"vehicles": list_vehicles_for_planning(),
+		"vehicles": list_vehicles_for_planning(
+			exclude_trip=trip, on_date=doc.get("departure_time")
+		),
 	}
 
 
 @frappe.whitelist()
-def list_vehicles_for_planning():
-	"""Plates with capacity / free space / on-truck, for the planning dialogs."""
-	return frappe.get_all(
+def list_vehicles_for_planning(exclude_trip=None, on_date=None):
+	"""Plates with capacity / free space / on-truck, for the planning dialogs.
+
+	Every figure is computed here rather than read from the stored fields on
+	Vehicle. The stored ones are a cache kept warm by hooks; a hook that did
+	not fire leaves them stale, and a planning dialog that offers a truck
+	which is actually full is worse than a slow one.
+
+	`free` is capacity less whichever is larger: what open trips have PROMISED
+	the truck, or what is PHYSICALLY in its warehouse. `max`, not the sum,
+	because those two are usually the same cement counted twice — a trip that
+	has loaded shows up in both.
+
+	A truck rated 20 with 10 already on it has 10 free, whether or not a trip
+	claims that 10. Pass `exclude_trip` so the trip being planned does not
+	count against itself.
+	"""
+	from thameen_erp.overrides.vehicle_stock import get_vehicle_warehouse
+
+	vehicles = frappe.get_all(
 		"Vehicle",
 		filters={"custom_status": ("in", ["Available", "Assigned"])},
-		fields=["name", "custom_capacity as capacity", "custom_available_qty as available",
-		        "custom_on_truck_qty as on_truck", "custom_assigned_driver as driver"],
-		order_by="custom_available_qty desc, name",
+		fields=[
+			"name",
+			"custom_capacity as capacity",
+			"custom_vehicle_warehouse as warehouse",
+			"custom_assigned_driver as driver",
+			"custom_status as status",
+		],
 		limit_page_length=200,
 	)
+	if not vehicles:
+		return []
+
+	committed = _committed_by_vehicle(
+		[v.name for v in vehicles], exclude_trip=exclude_trip, on_date=on_date
+	)
+	on_truck = _stock_by_warehouse([v.warehouse for v in vehicles if v.warehouse])
+
+	for v in vehicles:
+		v.committed = flt(committed.get(v.name))
+		v.on_truck = flt(on_truck.get(v.warehouse))
+		v.free = max(flt(v.capacity) - max(v.committed, v.on_truck), 0.0) if v.capacity else 0.0
+		# Kept for callers written against the old key name.
+		v.available = v.free
+
+	vehicles.sort(key=lambda v: (-flt(v.free), v.name))
+	return vehicles
+
+
+def _committed_by_vehicle(vehicles, exclude_trip=None, on_date=None):
+	"""{vehicle: promised stock-UOM qty} in one query instead of N.
+
+	Without `on_date` this is the busiest single day per truck, which is the
+	honest headline: a truck booked for ten separate days is not ten times
+	overloaded. With `on_date`, only that day's trips count.
+	"""
+	if not vehicles:
+		return {}
+
+	conditions = ["t.vehicle in %(vehicles)s", "t.docstatus = 1", "t.status in %(states)s"]
+	values = {"vehicles": tuple(vehicles), "states": COMMITTED_STATES}
+
+	if exclude_trip:
+		conditions.append("t.name != %(exclude)s")
+		values["exclude"] = exclude_trip
+
+	if on_date:
+		conditions.append("(t.departure_time is null or date(t.departure_time) = %(on_date)s)")
+		values["on_date"] = getdate(on_date)
+
+	rows = frappe.db.sql(
+		f"""
+		select t.vehicle,
+		       date(t.departure_time) as day,
+		       sum(ifnull(i.qty, 0) * ifnull(nullif(i.conversion_factor, 0), 1)) as qty
+		from `tabDelivery Trip Item` i
+		inner join `tabDelivery Trip` t on t.name = i.parent
+		where {" and ".join(conditions)}
+		group by t.vehicle, date(t.departure_time)
+		""",
+		values,
+		as_dict=True,
+	)
+
+	peak = {}
+	for row in rows:
+		peak[row.vehicle] = max(flt(peak.get(row.vehicle)), flt(row.qty))
+	return peak
+
+
+def _stock_by_warehouse(warehouses):
+	"""{warehouse: total actual qty} straight from Bin."""
+	if not warehouses:
+		return {}
+
+	rows = frappe.get_all(
+		"Bin",
+		filters={"warehouse": ("in", list(set(warehouses))), "actual_qty": (">", 0)},
+		fields=["warehouse", "sum(actual_qty) as qty"],
+		group_by="warehouse",
+	)
+	return {row.warehouse: flt(row.qty) for row in rows}
 
 
 @frappe.whitelist()
@@ -435,6 +585,23 @@ def trip_after_submit_or_cancel(doc, method=None):
 def vehicle_on_update(doc, method=None):
 	"""Capacity changed, or the truck was just created — recount."""
 	refresh_vehicle_load(doc.name)
+
+
+@frappe.whitelist()
+def recalculate_vehicle_load(vehicle):
+	"""Recount one truck on demand, from the Vehicle form.
+
+	The stored Committed / On Truck / Available figures are a cache. This is
+	the button that repairs them when a hook did not fire.
+	"""
+	frappe.has_permission("Vehicle", "write", doc=vehicle, throw=True)
+	refresh_vehicle_load(vehicle)
+	return frappe.db.get_value(
+		"Vehicle",
+		vehicle,
+		["custom_capacity", "custom_committed_qty", "custom_on_truck_qty", "custom_available_qty"],
+		as_dict=True,
+	)
 
 
 @frappe.whitelist()
