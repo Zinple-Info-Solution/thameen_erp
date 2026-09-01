@@ -27,17 +27,16 @@ def validate(doc, method=None):
 
 
 def after_insert(doc, method=None):
-	if not doc.get("custom_auto_create_masters"):
-		return
+	# Always. The old "Auto-create Cost Center & Warehouse" tick is gone: a
+	# vehicle without its warehouse cannot be loaded, planned or stock-checked,
+	# so leaving it optional only produced broken trucks.
 	ensure_vehicle_masters(doc)
 
 
 def on_update(doc, method=None):
-	# A vehicle created before the app was installed (or with the checkbox
-	# off at the time) still gets its masters when re-saved.
-	if doc.get("custom_auto_create_masters") and not (
-		doc.get("custom_cost_center") and doc.get("custom_vehicle_warehouse")
-	):
+	# A vehicle created before the app was installed still gets its masters
+	# when re-saved.
+	if not (doc.get("custom_cost_center") and doc.get("custom_vehicle_warehouse")):
 		ensure_vehicle_masters(doc)
 
 	_sync_driver_link(doc)
@@ -57,17 +56,79 @@ def ensure_vehicle_masters(doc):
 	values = {}
 	cost_center = doc.get("custom_cost_center") or create_vehicle_cost_center(doc, company)
 	warehouse = doc.get("custom_vehicle_warehouse") or create_vehicle_warehouse(doc, company)
+	asset_item = doc.get("custom_asset_item") or create_vehicle_asset_item(doc, company)
 
 	if cost_center and cost_center != doc.get("custom_cost_center"):
 		values["custom_cost_center"] = cost_center
 	if warehouse and warehouse != doc.get("custom_vehicle_warehouse"):
 		values["custom_vehicle_warehouse"] = warehouse
+	if asset_item and asset_item != doc.get("custom_asset_item"):
+		values["custom_asset_item"] = asset_item
 
 	if values:
 		# db_set avoids recursion through on_update.
 		for field, value in values.items():
 			doc.db_set(field, value, update_modified=False)
 			doc.set(field, value)
+
+
+def create_vehicle_asset_item(doc, company):
+	"""Create the fixed-asset Item an Asset record needs, named for the plate.
+
+	ERPNext will not let you raise an Asset without an Item that has
+	`is_fixed_asset`. Made the same way as the cost center and warehouse so a
+	new truck arrives with everything the Asset module asks for, and the item
+	is named after the vehicle rather than something generic.
+
+	The Asset itself is NOT created here — it needs a purchase date, value and
+	category that only Finance can supply. This just removes the item-creation
+	step from their path.
+	"""
+	item_code = cstr(doc.name).strip()
+	if not item_code:
+		return None
+
+	if frappe.db.exists("Item", item_code):
+		return item_code
+
+	group = _get_asset_item_group()
+	if not group:
+		return None
+
+	item = frappe.get_doc(
+		{
+			"doctype": "Item",
+			"item_code": item_code,
+			"item_name": item_code,
+			"description": _("Vehicle {0}").format(item_code),
+			"item_group": group,
+			"stock_uom": "Nos",
+			# A truck is a fixed asset, not something to be stocked or sold.
+			"is_fixed_asset": 1,
+			"is_stock_item": 0,
+			"is_purchase_item": 1,
+			"is_sales_item": 0,
+			"asset_category": _get_asset_category(),
+		}
+	)
+	item.flags.ignore_permissions = True
+	item.insert(ignore_permissions=True)
+	return item.name
+
+
+def _get_asset_item_group():
+	for name in ("Fixed Asset", "Fixed Assets", "All Item Groups"):
+		if frappe.db.exists("Item Group", name):
+			return name
+	return frappe.db.get_value("Item Group", {"is_group": 0}, "name")
+
+
+def _get_asset_category():
+	"""Optional. Asset Category is only required when the Asset is raised."""
+	for name in ("Motor Vehicle", "Vehicles", "Motor Vehicles"):
+		if frappe.db.exists("Asset Category", name):
+			return name
+	return frappe.db.get_value("Asset Category", {}, "name")
 
 
 def create_vehicle_cost_center(doc, company):

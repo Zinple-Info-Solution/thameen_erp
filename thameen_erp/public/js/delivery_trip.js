@@ -1,5 +1,14 @@
 const STAGES = ["Scheduled", "Loading", "In Transit", "Delivered", "POD Pending", "Completed"];
 
+// One field, one journey. Mirrors ROUTE_MAP in overrides/delivery_trip.py —
+// change both together.
+const ROUTE_MAP = {
+	"Warehouse to Customer": ["Own Warehouse", "Customer"],
+	"Supplier to Customer": ["Direct from Supplier", "Customer"],
+	"Supplier to Warehouse": ["Direct from Supplier", "Own Warehouse"],
+	"Supplier to Decide After Loading": ["Direct from Supplier", "Decide After Loading"],
+};
+
 const NEXT_STATUS = {
 	Scheduled: "Loading",
 	Loading: "In Transit",
@@ -46,6 +55,20 @@ frappe.ui.form.on("Delivery Trip", {
 			},
 		}));
 
+		frm.set_query("custom_loading_warehouse", () => ({
+			filters: { is_group: 0, company: frm.doc.company, custom_is_vehicle_warehouse: 0 },
+		}));
+		frm.set_query("custom_supplier_warehouse", () => ({
+			filters: { is_group: 0, custom_is_vehicle_warehouse: 0 },
+		}));
+		frm.set_query("custom_customer_warehouse", () => ({
+			filters: { is_group: 0, custom_is_vehicle_warehouse: 0 },
+		}));
+
+		frm.set_query("custom_target_warehouse", () => ({
+			filters: { is_group: 0, company: frm.doc.company, custom_is_vehicle_warehouse: 0 },
+		}));
+
 		// Freight is a service charge — a stock item here is rejected server-side.
 		frm.set_query("custom_transportation_item", () => ({
 			filters: { is_stock_item: 0, disabled: 0 },
@@ -71,9 +94,12 @@ frappe.ui.form.on("Delivery Trip", {
 				true
 			);
 		}
+		add_stock_buttons(frm);
+
 		if (frm.doc.docstatus === 0) {
 			add_get_items_button(frm);
 			add_load_buttons(frm);
+			add_split_trip_button(frm);
 			add_split_by_item_button(frm);
 			add_procurement_buttons(frm);
 			check_vehicle_load(frm, { prompt: false });
@@ -94,20 +120,28 @@ frappe.ui.form.on("Delivery Trip", {
 		auto_split_by_item(frm);
 	},
 
-	custom_destination_type(frm) {
-		if (frm.doc.custom_destination_type === "Own Warehouse" && frm.doc.custom_supply_source !== "Direct from Supplier") {
-			frm.set_value("custom_supply_source", "Direct from Supplier");
+	// The route is the field the dispatcher picks. Supply Source and
+	// Destination are derived from it here as well as in validate(), so the
+	// fields that depend on them (Supplier, Target Warehouse, Purchase Order)
+	// appear the moment the route is chosen rather than after a save.
+	custom_trip_route(frm) {
+		const pair = ROUTE_MAP[frm.doc.custom_trip_route];
+		if (!pair) return;
+		const [supply, destination] = pair;
+		if (frm.doc.custom_supply_source !== supply) frm.set_value("custom_supply_source", supply);
+		if (frm.doc.custom_destination_type !== destination) {
+			frm.set_value("custom_destination_type", destination);
 		}
-	},
-
-	custom_supply_source(frm) {
-		if (frm.doc.custom_supply_source !== "Direct from Supplier") return;
-		if (frm.doc.custom_supplier) return;
-		frappe.db
-			.get_single_value("Thameen Fleet Settings", "default_cement_supplier")
-			.then((supplier) => {
-				if (supplier) frm.set_value("custom_supplier", supplier);
-			});
+		if (supply === "Direct from Supplier" && !frm.doc.custom_supplier) {
+			frappe.db
+				.get_single_value("Thameen Fleet Settings", "default_cement_supplier")
+				.then((supplier) => {
+					if (supplier) frm.set_value("custom_supplier", supplier);
+				});
+		}
+		if (destination !== "Own Warehouse" && frm.doc.custom_target_warehouse) {
+			frm.set_value("custom_target_warehouse", null);
+		}
 	},
 
 	vehicle(frm) {
@@ -162,10 +196,6 @@ frappe.ui.form.on("Delivery Trip Item", {
 		frm.refresh_field("custom_trip_items");
 	},
 });
-
-function total_planned(frm) {
-	return (frm.doc.custom_trip_items || []).reduce((sum, row) => sum + flt(row.qty), 0);
-}
 
 function check_stock(frm, row) {
 	if (!row.item_code || !row.qty) return;
@@ -401,47 +431,11 @@ function check_vehicle_load(frm, opts) {
 				return;
 			}
 
-			render_load_indicator(frm, message);
-
 			if (!message.fits && opts.prompt && frm.doc.docstatus === 0) {
 				offer_split(frm, message);
 			}
 		},
 	});
-}
-
-function render_load_indicator(frm, load) {
-	const colour = load.fits ? "green" : "red";
-	const parts = [
-		__("Capacity {0}", [format_number(load.capacity)]),
-		__("committed {0}", [format_number(load.committed_qty)]),
-		__("available {0}", [format_number(load.available_qty)]),
-		__("this trip {0}", [format_number(load.planned_qty)]),
-	];
-
-	const on_truck = (load.on_truck_items || []).length
-		? (load.on_truck_items || [])
-				.map(
-					(item) =>
-						`${frappe.utils.escape_html(item.item_code)} ${format_number(item.qty)}` +
-						(item.on_loaded_trips
-							? ` <span class="text-muted">(${__("{0} on loaded trips", [format_number(item.on_loaded_trips)])})</span>`
-							: "")
-				)
-				.join(", ")
-		: __("empty");
-
-	frm.dashboard.add_comment(
-		`${frm.doc.vehicle}: ${parts.join(" · ")}` +
-			(load.fits ? "" : ` — ${__("over by {0}", [format_number(load.overflow_qty)])}`) +
-			`<br><span class="small">${__("On truck now")}: ${on_truck}` +
-			(load.vehicle_warehouse
-				? ` · ${frappe.utils.get_form_link("Warehouse", load.vehicle_warehouse, true, __("warehouse"))}`
-				: "") +
-			`</span>`,
-		colour,
-		true
-	);
 }
 
 function offer_split(frm, load) {
@@ -455,25 +449,14 @@ function offer_split(frm, load) {
 		.join("");
 
 	const why = committed_rows
-		? `<p class="text-muted small">${__("Already committed to this truck:")}</p>
-		   <table class="table table-bordered small">
+		? `<details class="mb-2"><summary class="small text-muted">${__("Already committed to this truck")}</summary>
+		   <table class="table table-bordered small mt-1">
 		     <thead><tr><th>${__("Trip")}</th><th>${__("Status")}</th><th class="text-right">${__("Qty")}</th></tr></thead>
 		     <tbody>${committed_rows}</tbody>
-		   </table>`
+		   </table></details>`
 		: "";
 
-	const summary = `
-		<p>${__("{0} cannot carry this trip in one go.", [frm.doc.vehicle])}</p>
-		<table class="table table-bordered">
-			<tbody>
-				<tr><td>${__("Rated capacity")}</td><td class="text-right">${format_number(load.capacity)}</td></tr>
-				<tr><td>${__("Already committed")}</td><td class="text-right">${format_number(load.committed_qty)}</td></tr>
-				<tr><td><b>${__("Free right now")}</b></td><td class="text-right"><b>${format_number(load.available_qty)}</b></td></tr>
-				<tr><td>${__("This trip needs")}</td><td class="text-right">${format_number(load.planned_qty)}</td></tr>
-				<tr><td><b>${__("Over by")}</b></td><td class="text-right"><b>${format_number(load.overflow_qty)}</b></td></tr>
-			</tbody>
-		</table>
-		${why}`;
+	const summary = why;
 
 	const dialog = new frappe.ui.Dialog({
 		title: __("Not Enough Room"),
@@ -483,10 +466,7 @@ function offer_split(frm, load) {
 			{
 				fieldname: "use_capacity",
 				fieldtype: "Check",
-				label: __("Ignore what is committed and plan against full capacity"),
-				description: __(
-					"Tick this if the other trips will be finished before this one loads. The first trip then takes a full truckload instead of only the free space."
-				),
+				label: __("Plan against full capacity"),
 			},
 			{ fieldtype: "Section Break" },
 			{ fieldtype: "HTML", fieldname: "plan" },
@@ -508,14 +488,6 @@ function offer_split(frm, load) {
 					dialog.hide();
 					frm.reload_doc();
 				},
-			});
-		},
-		secondary_action_label: __("Keep as One Trip"),
-		secondary_action() {
-			dialog.hide();
-			frappe.show_alert({
-				message: __("Left as one trip. It will still submit — the overload is a warning, not a block."),
-				indicator: "orange",
 			});
 		},
 	});
@@ -549,50 +521,219 @@ function refresh_plan(frm, dialog) {
 				items: load.items.map((i) => ({ item_code: i.item_code, uom: i.uom, qty: flt(i.qty) })),
 			}));
 			dialog.vehicles = message.vehicles || [];
+			dialog.plan_use_capacity = dialog.get_value("use_capacity") ? 1 : 0;
 			dialog.totals = {};
 			dialog.plan.forEach((l) => l.items.forEach((i) => (dialog.totals[i.item_code] = flt(dialog.totals[i.item_code]) + i.qty)));
+			// Size every row against the truck on it before the first render.
+			reflow_plan(dialog);
 			render_plan(frm, dialog);
 		},
 	});
 }
 
+// ---------------------------------------------------------------------------
+// The split plan
+//
+// The plan is a list of loads. Each load has one truck, one departure and a
+// set of item quantities. Two invariants hold at all times:
+//
+//   * per item, the quantities across all loads add up to exactly what the
+//     trip carries — a split moves cement between trucks, it never creates or
+//     destroys any;
+//   * a load never carries more than its truck's free space.
+//
+// Choosing a truck therefore RESIZES that load to the truck and pushes the
+// remainder down the list. Pick a 10-tonne truck for the first load of a
+// 50-tonne trip and it takes 10; pick a 20-tonne truck for the second and it
+// takes 20, with the last 20 spread over whatever rows are left.
+// ---------------------------------------------------------------------------
+
+const PLAN_TOL = 0.001;
+
+function load_total(load) {
+	return (load.items || []).reduce((sum, item) => sum + flt(item.qty), 0);
+}
+
+function plan_grand_total(dialog) {
+	return Object.keys(dialog.totals || {}).reduce((sum, code) => sum + flt(dialog.totals[code]), 0);
+}
+
+function vehicle_of(dialog, name) {
+	return (dialog.vehicles || []).find((v) => v.name === name);
+}
+
+// Free space on a truck, or null when it has no Capacity rated — an unrated
+// truck cannot be planned against, so its load is left exactly as it is.
+function vehicle_free(dialog, name) {
+	const v = vehicle_of(dialog, name);
+	if (!v || !flt(v.capacity)) return null;
+	// "Plan against full capacity" means the other trips on that truck will be
+	// done by the time this one loads, so ignore what is committed.
+	if (dialog.plan_use_capacity) return flt(v.capacity);
+	return flt(v.free !== undefined ? v.free : v.available);
+}
+
+// Trucks already chosen on another row. A truck carries one load per plan.
+function taken_vehicles(dialog, except_index) {
+	return new Set(
+		(dialog.plan || [])
+			.map((load, i) => (i === except_index ? null : load.vehicle))
+			.filter(Boolean)
+	);
+}
+
+// Work out how much each load should carry, then rewrite the quantities to
+// match. A load with a truck takes exactly what that truck can hold, in row
+// order. Everything still unplaced sits on ONE row — the first without a truck
+// — so the tail collapses to a single remainder instead of splitting into
+// fractions across rows nobody has assigned yet.
+function reflow_plan(dialog) {
+	const plan = dialog.plan || [];
+	if (!plan.length) return;
+
+	const grand = plan_grand_total(dialog);
+	const targets = new Array(plan.length).fill(0);
+	let left = grand;
+
+	plan.forEach((load, i) => {
+		// A quantity typed by hand is the dispatcher's decision and outranks
+		// the truck's rating — they may know the truck will be emptied first.
+		if (load.manual) {
+			targets[i] = Math.max(Math.min(load_total(load), left), 0);
+			left -= targets[i];
+			return;
+		}
+		const free = vehicle_free(dialog, load.vehicle);
+		if (free === null) return;
+		targets[i] = Math.max(Math.min(free, left), 0);
+		left -= targets[i];
+	});
+
+	if (left > PLAN_TOL) {
+		const idx = plan.findIndex((l) => !l.manual && vehicle_free(dialog, l.vehicle) === null);
+		if (idx === -1) {
+			// Every row is spoken for and there is still cement: it needs a
+			// further truck, not an overloaded one.
+			plan.push({
+				vehicle: null,
+				departure_time: frappe.datetime.add_days(
+					plan[plan.length - 1].departure_time || frappe.datetime.get_today(),
+					1
+				),
+				items: [],
+			});
+			targets.push(left);
+		} else {
+			targets[idx] = left;
+		}
+		left = 0;
+	}
+
+	apply_targets(dialog, targets);
+	prune_empty_loads(dialog);
+}
+
+// Pour the trip's quantities into the loads, filling each up to its target.
+// Rebuilding beats nudging: it cannot drift out of balance.
+function apply_targets(dialog, targets) {
+	const codes = Object.keys(dialog.totals || {});
+	const pool = {};
+	codes.forEach((code) => (pool[code] = flt(dialog.totals[code])));
+
+	const uom_of = {};
+	(dialog.plan || []).forEach((load) =>
+		(load.items || []).forEach((item) => {
+			if (item.uom) uom_of[item.item_code] = item.uom;
+		})
+	);
+
+	dialog.plan.forEach((load, index) => {
+		let room = Math.max(flt(targets[index]), 0);
+		const items = [];
+		codes.forEach((code) => {
+			if (room <= PLAN_TOL || pool[code] <= PLAN_TOL) return;
+			const take = Math.min(pool[code], room);
+			items.push({ item_code: code, uom: uom_of[code], qty: take });
+			pool[code] -= take;
+			room -= take;
+		});
+		load.items = items;
+	});
+
+	// Rounding crumbs go on the last load so the balance still reads zero.
+	const leftovers = codes.filter((code) => pool[code] > PLAN_TOL);
+	if (leftovers.length) {
+		const last = dialog.plan[dialog.plan.length - 1];
+		leftovers.forEach((code) => {
+			const existing = last.items.find((i) => i.item_code === code);
+			if (existing) existing.qty = flt(existing.qty) + pool[code];
+			else last.items.push({ item_code: code, uom: uom_of[code], qty: pool[code] });
+			pool[code] = 0;
+		});
+	}
+}
+
+// A load with nothing on it is noise — unless it is the first, which is this
+// trip itself and always stays.
+function prune_empty_loads(dialog) {
+	dialog.plan = dialog.plan.filter((load, index) => index === 0 || load_total(load) > PLAN_TOL);
+}
+
 function vehicle_select_html(dialog, value, cls, index) {
+	const taken = taken_vehicles(dialog, index);
 	const opts = [`<option value="">${__("— choose later —")}</option>`]
 		.concat(
-			(dialog.vehicles || []).map(
-				(v) =>
-					`<option value="${frappe.utils.escape_html(v.name)}" ${v.name === value ? "selected" : ""}>` +
-					`${frappe.utils.escape_html(v.name)} · ${__("cap")} ${format_number(v.capacity)} · ${__("free")} ${format_number(v.available)}</option>`
-			)
+			(dialog.vehicles || [])
+				.filter((v) => v.name === value || !taken.has(v.name))
+				.map((v) => {
+					const free = flt(v.free !== undefined ? v.free : v.available);
+					return (
+						`<option value="${frappe.utils.escape_html(v.name)}" ${v.name === value ? "selected" : ""}>` +
+						`${frappe.utils.escape_html(v.name)} · ${__("cap")} ${format_number(v.capacity)} · ${__("free")} ${format_number(free)}</option>`
+					);
+				})
 		)
 		.join("");
 	return `<select class="form-control input-xs ${cls}" data-index="${index}">${opts}</select>`;
 }
 
+// What the chosen truck actually has, shown beside the row so the dispatcher
+// does not have to reopen the dropdown to check.
+function vehicle_state_html(dialog, load) {
+	if (!load.vehicle) return `<span class="text-muted">—</span>`;
+	const v = vehicle_of(dialog, load.vehicle);
+	if (!v) return `<span class="text-muted">—</span>`;
+	if (!flt(v.capacity)) return `<span class="text-danger small">${__("no capacity set")}</span>`;
+
+	const free = flt(v.free !== undefined ? v.free : v.available);
+	const bits = [`${__("free")} <b>${format_number(free)}</b> ${__("of")} ${format_number(v.capacity)}`];
+	if (flt(v.on_truck)) bits.push(`${__("on truck")} ${format_number(v.on_truck)}`);
+	if (flt(v.committed)) bits.push(`${__("committed")} ${format_number(v.committed)}`);
+	return `<span class="small">${bits.join("<br>")}</span>`;
+}
+
 function render_plan(frm, dialog) {
 	const wrapper = dialog.fields_dict.plan.$wrapper;
 	const plan = dialog.plan;
-	const cap_of = (name) => {
-		const v = (dialog.vehicles || []).find((x) => x.name === name);
-		return v ? flt(v.capacity) : 0;
-	};
 
 	const rows = plan
 		.map((load, index) => {
-			const total = load.items.reduce((a, i) => a + flt(i.qty), 0);
-			const cap = cap_of(load.vehicle);
-			const over = cap && total > cap + 0.001;
-			const items = load.items
-				.map(
-					(i, k) =>
-						`<div class="d-flex align-items-center mb-1">
-							<span style="min-width:90px">${frappe.utils.escape_html(i.item_code)}</span>
-							<input type="number" step="any" min="0" class="form-control input-xs plan-qty" style="width:110px"
-								data-index="${index}" data-item="${k}" value="${i.qty}">
-							<span class="text-muted small ml-1">${frappe.utils.escape_html(i.uom || "")}</span>
-						</div>`
-				)
-				.join("");
+			const total = load_total(load);
+			const free = vehicle_free(dialog, load.vehicle);
+			const over = free !== null && total > free + PLAN_TOL;
+			const items = load.items.length
+				? load.items
+						.map(
+							(i, k) =>
+								`<div class="d-flex align-items-center mb-1">
+									<span style="min-width:90px">${frappe.utils.escape_html(i.item_code)}</span>
+									<input type="number" step="any" min="0" class="form-control input-xs plan-qty" style="width:110px"
+										data-index="${index}" data-item="${k}" value="${i.qty}">
+									<span class="text-muted small ml-1">${frappe.utils.escape_html(i.uom || "")}</span>
+								</div>`
+						)
+						.join("")
+				: `<span class="text-muted small">${__("nothing on this trip")}</span>`;
 			const label =
 				index === 0
 					? `<b>${__("This trip")}</b><br><span class="text-muted small">${frm.doc.name}</span>`
@@ -601,8 +742,11 @@ function render_plan(frm, dialog) {
 			return `<tr class="${over ? "table-warning" : ""}">
 				<td>${label}</td>
 				<td>${items}</td>
-				<td class="text-right"><b>${format_number(total)}</b>${over ? `<br><span class="text-danger small">${__("over {0}", [format_number(cap)])}</span>` : ""}</td>
+				<td class="text-right"><b>${format_number(total)}</b>
+					${over ? `<br><span class="text-danger small">${__("over by {0}", [format_number(total - free)])}</span>` : ""}
+					${load.manual ? `<br><a class="small text-muted plan-auto" data-index="${index}">${__("auto")}</a>` : ""}</td>
 				<td>${vehicle_select_html(dialog, load.vehicle, "plan-vehicle", index)}</td>
+				<td>${vehicle_state_html(dialog, load)}</td>
 				<td><input type="date" class="form-control input-xs plan-date" data-index="${index}"
 					value="${(load.departure_time || "").slice(0, 10)}"></td>
 			</tr>`;
@@ -616,20 +760,34 @@ function render_plan(frm, dialog) {
 		code,
 		diff: flt(placed[code]) - flt(dialog.totals[code]),
 	}));
-	const balanced = balance.every((b) => Math.abs(b.diff) < 0.001);
+	const balanced = balance.every((b) => Math.abs(b.diff) < PLAN_TOL);
 	const balance_html = balance
 		.map(
 			(b) =>
-				`<span class="${Math.abs(b.diff) < 0.001 ? "text-success" : "text-danger"} mr-3">` +
+				`<span class="${Math.abs(b.diff) < PLAN_TOL ? "text-success" : "text-danger"} mr-3">` +
 				`${frappe.utils.escape_html(b.code)}: ${format_number(placed[b.code])} / ${format_number(dialog.totals[b.code])}` +
-				(Math.abs(b.diff) < 0.001 ? " ✓" : ` (${b.diff > 0 ? "+" : ""}${format_number(b.diff)})`) +
+				(Math.abs(b.diff) < PLAN_TOL ? " ✓" : ` (${b.diff > 0 ? "+" : ""}${format_number(b.diff)})`) +
 				`</span>`
 		)
 		.join("");
 
+	// Row 1 IS this trip, so it must keep something. When its truck has no room
+	// the message names the truck and says why, rather than just refusing.
+	const first_empty = load_total(plan[0]) <= PLAN_TOL;
+	let warning = "";
+	if (first_empty) {
+		const v = vehicle_of(dialog, plan[0].vehicle);
+		warning = v
+			? `<div class="text-danger small mb-2">${__(
+					"{0} has no room — rated {1}, {2} already on it. Pick another truck for row 1, or unload it first.",
+					[v.name, format_number(v.capacity), format_number(Math.max(flt(v.on_truck), flt(v.committed)))]
+			  )}</div>`
+			: `<div class="text-danger small mb-2">${__("Row 1 needs a truck with free space.")}</div>`;
+	}
+
 	wrapper.html(`
 		<div class="d-flex justify-content-between align-items-center mb-2">
-			<span>${__("{0} trip(s). Edit any quantity, truck or date — the last trip rebalances to keep the total.", [plan.length])}</span>
+			<span class="small text-muted">${__("{0} trip(s)", [plan.length])}</span>
 			<span>
 				<button class="btn btn-xs btn-default plan-add">${__("+ Add trip")}</button>
 				<button class="btn btn-xs btn-default plan-same-truck ml-1">${__("Same truck, one day apart")}</button>
@@ -637,26 +795,35 @@ function render_plan(frm, dialog) {
 		</div>
 		<table class="table table-bordered small">
 			<thead><tr>
-				<th style="width:16%">${__("Trip")}</th>
+				<th style="width:14%">${__("Trip")}</th>
 				<th>${__("Items & qty")}</th>
-				<th class="text-right" style="width:10%">${__("Total")}</th>
-				<th style="width:28%">${__("Vehicle")}</th>
-				<th style="width:14%">${__("Departure")}</th>
+				<th class="text-right" style="width:9%">${__("Total")}</th>
+				<th style="width:24%">${__("Vehicle")}</th>
+				<th style="width:16%">${__("Available stock")}</th>
+				<th style="width:13%">${__("Departure")}</th>
 			</tr></thead>
 			<tbody>${rows}</tbody>
 		</table>
-		<div class="small mb-2">${__("Placed")}: ${balance_html}</div>
-		<p class="text-muted small">${__("Site, loading warehouse, freight item, supplier and order links are copied to every new trip. Over-capacity trips are allowed but flagged.")}</p>`);
+		<div class="small mb-2">${balance_html}</div>
+		${warning}`);
 
-	dialog.get_primary_btn().prop("disabled", !balanced);
+	dialog.get_primary_btn().prop("disabled", !balanced || first_empty);
 
 	wrapper.find(".plan-qty").on("change", function () {
 		const index = parseInt($(this).data("index"), 10);
 		const k = parseInt($(this).data("item"), 10);
 		const item = plan[index].items[k];
-		const new_qty = Math.max(flt($(this).val()), 0);
+		// Never accept more of an item than the trip actually carries.
+		const elsewhere = plan.reduce((sum, l, j) => {
+			if (j === index) return sum;
+			const other = l.items.find((x) => x.item_code === item.item_code);
+			return sum + (other ? flt(other.qty) : 0);
+		}, 0);
+		const ceiling = flt(dialog.totals[item.item_code]) - elsewhere + 0;
+		const new_qty = Math.min(Math.max(flt($(this).val()), 0), Math.max(flt(item.qty), ceiling));
 		const diff = new_qty - flt(item.qty);
 		item.qty = new_qty;
+		plan[index].manual = true;
 		// Rebalance: the last OTHER trip carrying this item absorbs the change.
 		for (let j = plan.length - 1; j >= 0; j--) {
 			if (j === index) continue;
@@ -669,7 +836,19 @@ function render_plan(frm, dialog) {
 		render_plan(frm, dialog);
 	});
 	wrapper.find(".plan-vehicle").on("change", function () {
-		plan[parseInt($(this).data("index"), 10)].vehicle = $(this).val() || null;
+		const index = parseInt($(this).data("index"), 10);
+		plan[index].vehicle = $(this).val() || null;
+		// Picking a truck resizes its load to the space that truck has, and
+		// pushes whatever no longer fits onto the rows below. That is a fresh
+		// decision, so any quantity typed on this row is released.
+		plan[index].manual = false;
+		reflow_plan(dialog);
+		render_plan(frm, dialog);
+	});
+	wrapper.find(".plan-auto").on("click", function () {
+		// Hand back to the automatic fit for this row.
+		plan[parseInt($(this).data("index"), 10)].manual = false;
+		reflow_plan(dialog);
 		render_plan(frm, dialog);
 	});
 	wrapper.find(".plan-date").on("change", function () {
@@ -677,24 +856,42 @@ function render_plan(frm, dialog) {
 	});
 	wrapper.find(".plan-remove").on("click", function () {
 		const index = parseInt($(this).data("index"), 10);
-		// Hand its quantities to the previous trip so nothing is lost.
-		plan[index].items.forEach((i) => {
-			const target = plan[index - 1].items.find((x) => x.item_code === i.item_code) || plan[0].items.find((x) => x.item_code === i.item_code);
-			if (target) target.qty = flt(target.qty) + flt(i.qty);
-		});
 		plan.splice(index, 1);
+		reflow_plan(dialog);
 		render_plan(frm, dialog);
 	});
 	wrapper.find(".plan-add").on("click", () => {
-		const last = plan[plan.length - 1];
-		plan.push({
+		// Halve the biggest row without a truck. Appending an empty row would
+		// be pruned straight away, since the remainder lives on one row.
+		let idx = -1;
+		plan.forEach((l, i) => {
+			if (l.vehicle) return;
+			if (idx === -1 || load_total(l) > load_total(plan[idx])) idx = i;
+		});
+		if (idx === -1) idx = plan.length - 1;
+
+		const half = load_total(plan[idx]) / 2;
+		if (half <= PLAN_TOL) return;
+
+		const moved = [];
+		plan[idx].items.forEach((item) => {
+			const take = flt(item.qty) / 2;
+			item.qty = flt(item.qty) - take;
+			moved.push({ item_code: item.item_code, uom: item.uom, qty: take });
+		});
+		plan.splice(idx + 1, 0, {
 			vehicle: null,
-			departure_time: frappe.datetime.add_days(last.departure_time || frappe.datetime.get_today(), 1),
-			items: last.items.map((i) => ({ item_code: i.item_code, uom: i.uom, qty: 0 })),
+			departure_time: frappe.datetime.add_days(
+				plan[idx].departure_time || frappe.datetime.get_today(),
+				1
+			),
+			items: moved,
 		});
 		render_plan(frm, dialog);
 	});
 	wrapper.find(".plan-same-truck").on("click", () => {
+		// One truck doing every load, a day apart. Capacity is per load here,
+		// so the same plate legitimately repeats.
 		const base = plan[0].departure_time || frappe.datetime.get_today();
 		plan.forEach((l, i) => {
 			l.vehicle = frm.doc.vehicle;
@@ -705,11 +902,151 @@ function render_plan(frm, dialog) {
 }
 
 function collect_plan(dialog) {
-	return (dialog.plan || []).map((l) => ({
-		vehicle: l.vehicle || null,
-		departure_time: l.departure_time || null,
-		items: l.items.filter((i) => flt(i.qty) > 0).map((i) => ({ item_code: i.item_code, qty: flt(i.qty) })),
-	})).filter((l) => l.items.length);
+	return (dialog.plan || [])
+		.map((l) => ({
+			vehicle: l.vehicle || null,
+			departure_time: l.departure_time || null,
+			items: l.items.filter((i) => flt(i.qty) > 0).map((i) => ({ item_code: i.item_code, qty: flt(i.qty) })),
+		}))
+		.filter((l) => l.items.length);
+}
+
+// Split is now a button, not only something the app offers when it notices the
+// truck is too small. A dispatcher who already knows the load needs two trucks
+// should not have to overfill one first to be shown the dialog.
+function add_split_trip_button(frm) {
+	if (!frm.doc.vehicle || frm.is_new()) return;
+	if (!(frm.doc.custom_trip_items || []).length) return;
+
+	frm.add_custom_button(__("Split Trip"), () => {
+		frappe.call({
+			method: "thameen_erp.overrides.vehicle_load.get_vehicle_load",
+			args: { vehicle: frm.doc.vehicle, trip: frm.doc.name },
+			freeze: true,
+			callback({ message }) {
+				if (!message || !message.has_capacity) {
+					frappe.msgprint(
+						__("Set a Capacity on {0} before splitting — the split sizes each trip against it.", [
+							frm.doc.vehicle,
+						])
+					);
+					return;
+				}
+				offer_split(frm, message);
+			},
+		});
+	});
+}
+
+// Two read-only views that used to be dashboard banners shouting on every
+// refresh. On a button they are there when wanted and silent otherwise.
+function add_stock_buttons(frm) {
+	if (frm.doc.vehicle) {
+		frm.add_custom_button(__("Check Stock Against Vehicle"), () => show_vehicle_check(frm), __("Stock"));
+	}
+	frm.add_custom_button(__("View All Warehouse Stock"), () => show_all_warehouse_stock(frm), __("Stock"));
+}
+
+// What the truck holds, what it is promised, and whether this trip fits.
+function show_vehicle_check(frm) {
+	frappe.call({
+		method: "thameen_erp.overrides.vehicle_load.get_vehicle_load",
+		args: { vehicle: frm.doc.vehicle, trip: frm.doc.name },
+		freeze: true,
+		callback({ message }) {
+			if (!message) return;
+			const load = message;
+
+			const rows = (load.on_truck_items || [])
+				.map(
+					(i) => `<tr>
+						<td>${frappe.utils.escape_html(i.item_code)}</td>
+						<td class="text-right">${format_number(i.qty)}</td>
+						<td class="text-right">${format_number(i.on_loaded_trips || 0)}</td>
+					</tr>`
+				)
+				.join("");
+
+			const fits = load.fits;
+			const html = `
+				<table class="table table-bordered small">
+					<tbody>
+						<tr><td>${__("Rated capacity")}</td><td class="text-right">${format_number(load.capacity)}</td></tr>
+						<tr><td>${__("Promised to other trips that day")}</td><td class="text-right">${format_number(load.committed_qty)}</td></tr>
+						<tr><td><b>${__("Free")}</b></td><td class="text-right"><b>${format_number(load.available_qty)}</b></td></tr>
+						<tr><td>${__("This trip needs")}</td><td class="text-right">${format_number(load.planned_qty)}</td></tr>
+						<tr class="${fits ? "" : "table-danger"}">
+							<td><b>${fits ? __("Fits") : __("Over by")}</b></td>
+							<td class="text-right"><b>${fits ? "✓" : format_number(load.overflow_qty)}</b></td>
+						</tr>
+					</tbody>
+				</table>
+				${rows
+					? `<div class="small text-muted mb-1">${__("On the truck now")}</div>
+					   <table class="table table-bordered small">
+						 <thead><tr><th>${__("Item")}</th><th class="text-right">${__("Qty")}</th>
+						 <th class="text-right">${__("On loaded trips")}</th></tr></thead>
+						 <tbody>${rows}</tbody>
+					   </table>`
+					: `<p class="text-muted small">${__("The truck is empty.")}</p>`}`;
+
+			const d = new frappe.ui.Dialog({
+				title: __("{0} — stock check", [frm.doc.vehicle]),
+				size: "small",
+				fields: [{ fieldtype: "HTML", options: html }],
+			});
+			if (!fits) {
+				d.set_primary_action(__("Split Trip"), () => {
+					d.hide();
+					offer_split(frm, load);
+				});
+			}
+			d.show();
+		},
+	});
+}
+
+// Every warehouse holding any item on this trip, so the dispatcher can see
+// where to load from without leaving the form.
+function show_all_warehouse_stock(frm) {
+	const items = distinct_items(frm);
+	if (!items.length) {
+		frappe.msgprint(__("Add an item to the trip first."));
+		return;
+	}
+
+	frappe.call({
+		method: "thameen_erp.api.stock_by_warehouse",
+		args: { items: JSON.stringify(items) },
+		freeze: true,
+		callback({ message }) {
+			const lines = message || [];
+			const body = lines.length
+				? `<table class="table table-bordered small">
+					<thead><tr>
+						<th>${__("Item")}</th><th>${__("Warehouse")}</th>
+						<th class="text-right">${__("Qty")}</th><th>${__("Type")}</th>
+					</tr></thead>
+					<tbody>${lines
+						.map(
+							(r) => `<tr>
+								<td>${frappe.utils.escape_html(r.item_code)}</td>
+								<td>${frappe.utils.escape_html(r.warehouse)}</td>
+								<td class="text-right">${format_number(r.qty)}</td>
+								<td>${r.is_vehicle ? __("truck") : __("yard")}</td>
+							</tr>`
+						)
+						.join("")}</tbody>
+				   </table>`
+				: `<p class="text-muted">${__("None of these items is in any warehouse.")}</p>`;
+
+			new frappe.ui.Dialog({
+				title: __("Stock by warehouse"),
+				size: "large",
+				fields: [{ fieldtype: "HTML", options: body }],
+			}).show();
+		},
+	});
 }
 
 function add_load_buttons(frm) {

@@ -83,7 +83,9 @@
    "in_list_view": 1,
    "label": "Planned Qty",
    "reqd": 1,
-   "columns": 1
+   "columns": 1,
+   "default": "0",
+   "description": "Set from the vehicle when one is chosen."
   },
   {
    "fieldname": "delivered_qty",

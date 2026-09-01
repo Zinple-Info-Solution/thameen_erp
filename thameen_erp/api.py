@@ -1,5 +1,7 @@
 """Whitelisted endpoints for consolidated billing and fleet lookups."""
 
+import json
+
 import frappe
 from frappe import _
 from frappe.utils import flt, get_first_day, get_last_day, getdate
@@ -233,6 +235,43 @@ def get_vehicle_stock(vehicle, item_code=None):
 
 
 @frappe.whitelist()
+def stock_by_warehouse(items):
+	"""Every warehouse holding any of these items, yard and truck alike.
+
+	Feeds the "View All Warehouse Stock" button on Delivery Trip. Yards first,
+	then trucks, biggest holding first — the order a dispatcher decides in.
+	"""
+	if isinstance(items, str):
+		items = json.loads(items)
+	if not items:
+		return []
+
+	bins = frappe.get_all(
+		"Bin",
+		filters={"item_code": ("in", items), "actual_qty": (">", 0)},
+		fields=["item_code", "warehouse", "actual_qty"],
+	)
+	if not bins:
+		return []
+
+	vehicle_warehouses = set(
+		frappe.get_all("Warehouse", filters={"custom_is_vehicle_warehouse": 1}, pluck="name")
+	)
+
+	rows = [
+		{
+			"item_code": b.item_code,
+			"warehouse": b.warehouse,
+			"qty": flt(b.actual_qty),
+			"is_vehicle": 1 if b.warehouse in vehicle_warehouses else 0,
+		}
+		for b in bins
+	]
+	rows.sort(key=lambda r: (r["item_code"], r["is_vehicle"], -r["qty"]))
+	return rows
+
+
+@frappe.whitelist()
 def check_stock_availability(item_code, qty, company=None):
 	"""Warehouse stock plus stock already sitting on trucks."""
 	bins = frappe.get_all(
@@ -246,9 +285,20 @@ def check_stock_availability(item_code, qty, company=None):
 		)
 	)
 
-	warehouse_qty = sum(flt(b.actual_qty) for b in bins if b.warehouse not in vehicle_warehouses)
-	truck_qty = sum(flt(b.actual_qty) for b in bins if b.warehouse in vehicle_warehouses)
+	yard_bins = [b for b in bins if b.warehouse not in vehicle_warehouses]
+	truck_bins = [b for b in bins if b.warehouse in vehicle_warehouses]
+
+	warehouse_qty = sum(flt(b.actual_qty) for b in yard_bins)
+	truck_qty = sum(flt(b.actual_qty) for b in truck_bins)
 	reserved = sum(flt(b.reserved_qty) for b in bins)
+
+	# Named, not just counted. "90 in warehouses" does not tell anyone which
+	# yard to send the truck to.
+	def _named(rows):
+		return [
+			{"warehouse": r.warehouse, "qty": flt(r.actual_qty)}
+			for r in sorted(rows, key=lambda x: -flt(x.actual_qty))
+		]
 
 	return {
 		"item_code": item_code,
@@ -258,5 +308,7 @@ def check_stock_availability(item_code, qty, company=None):
 		"reserved_qty": reserved,
 		"available_qty": warehouse_qty + truck_qty - reserved,
 		"sufficient": (warehouse_qty + truck_qty - reserved) >= flt(qty),
+		"warehouses": _named(yard_bins),
+		"trucks": _named(truck_bins),
 		"breakdown": bins,
 	}

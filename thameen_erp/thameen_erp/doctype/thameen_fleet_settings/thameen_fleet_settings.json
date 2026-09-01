@@ -12,6 +12,7 @@
   "default_company",
   "default_cement_supplier",
   "allow_over_capacity_manual_load",
+  "block_trip_over_capacity",
   "sec_ops",
   "auto_create_delivery_trip",
   "auto_close_sales_order",
@@ -128,8 +129,15 @@
    "fieldname": "allow_over_capacity_manual_load",
    "fieldtype": "Check",
    "label": "Allow Manual Loading Above Capacity",
+   "default": "0",
+   "description": "Let a manual load push a vehicle past its rated capacity, after a confirmation. Off means the load is refused outright."
+  },
+  {
    "default": "1",
-   "description": "When ticked, loading a truck past its rated Capacity from the Vehicle form warns and asks for confirmation. When unticked it is refused."
+   "description": "Refuse to save a Delivery Trip whose planned qty is above the free space on its vehicle. Turn off to warn instead.",
+   "fieldname": "block_trip_over_capacity",
+   "fieldtype": "Check",
+   "label": "Block Trips Above Vehicle Capacity"
   }
  ],
  "index_web_pages_for_search": 1,

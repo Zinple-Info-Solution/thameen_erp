@@ -30,7 +30,14 @@ save on a submitted document raises UpdateAfterSubmitError.
 import frappe
 from frappe import _
 from frappe.query_builder.functions import Sum
-from frappe.utils import get_link_to_form, flt
+from frappe.utils import (
+	cint,
+	flt,
+	get_datetime,
+	get_link_to_form,
+	now_datetime,
+	time_diff_in_hours,
+)
 
 from erpnext.stock.doctype.delivery_trip.delivery_trip import DeliveryTrip
 
@@ -56,6 +63,18 @@ NEXT_STATUS = {
 
 TERMINAL_STATES = ("Completed", "Cancelled")
 
+# One field, one journey. Supply Source and Destination remain the fields every
+# rule reads — this map is the only place the pairing is written down. Keep it
+# in step with TRIP_ROUTES in thameen_erp.install.
+ROUTE_MAP = {
+	"Warehouse to Customer": ("Own Warehouse", "Customer"),
+	"Supplier to Customer": ("Direct from Supplier", "Customer"),
+	"Supplier to Warehouse": ("Direct from Supplier", "Own Warehouse"),
+	"Supplier to Decide After Loading": ("Direct from Supplier", "Decide After Loading"),
+}
+
+ROUTE_OF_PAIR = {pair: route for route, pair in ROUTE_MAP.items()}
+
 # Trips in these states no longer reserve Sales Order qty — the Delivery Note
 # already moved that qty onto `Sales Order Item.delivered_qty`.
 CONSUMED_STATES = ("Delivered", "POD Pending", "Completed", "Cancelled")
@@ -70,7 +89,74 @@ class ThameenDeliveryTrip(DeliveryTrip):
 
 	def validate(self):
 		self._migrate_legacy_single_item()
+		self._sync_trip_route()
+		self._validate_no_duplicate_trip()
+		self._set_loading_warehouse()
 		self._recompute()
+
+	def _set_loading_warehouse(self):
+		"""Fill the yard the truck loads from, when it is obvious.
+
+		Every trip row falls back to this warehouse, and a row with no
+		warehouse cannot be loaded, so leaving it blank fails late and
+		confusingly. Order of preference: what the rows already agree on, then
+		the company default.
+		"""
+		if self.get("custom_loading_warehouse"):
+			return
+
+		rows = self.get("custom_trip_items") or []
+		warehouses = {row.source_warehouse for row in rows if row.source_warehouse}
+		if len(warehouses) == 1:
+			self.custom_loading_warehouse = warehouses.pop()
+			return
+
+		if self.get("company"):
+			default = frappe.get_cached_value("Company", self.company, "default_warehouse_for_sales_return")
+			if not default:
+				default = frappe.db.get_value(
+					"Warehouse",
+					{"company": self.company, "is_group": 0, "custom_is_vehicle_warehouse": 0},
+					"name",
+					order_by="creation",
+				)
+			if default:
+				self.custom_loading_warehouse = default
+
+	def _validate_no_duplicate_trip(self):
+		"""One truck cannot leave twice at the same moment.
+
+		Two open trips on the same vehicle and the same departure is always a
+		mistake — usually a double-submitted plan or a copied trip. Same truck
+		on the same DAY is fine and common; the capacity check handles whether
+		the day's total actually fits.
+		"""
+		if not (self.get("vehicle") and self.get("departure_time")):
+			return
+
+		clash = frappe.db.get_value(
+			"Delivery Trip",
+			{
+				"name": ("!=", self.name or ""),
+				"vehicle": self.vehicle,
+				"departure_time": self.departure_time,
+				"docstatus": ("<", 2),
+				"status": ("not in", TERMINAL_STATES),
+			},
+			["name", "status"],
+			as_dict=True,
+		)
+		if not clash:
+			return
+
+		frappe.throw(
+			_("{0} already has trip {1} ({2}) departing at exactly this time. Change the departure time or the vehicle.").format(
+				frappe.bold(self.vehicle),
+				get_link_to_form("Delivery Trip", clash.name),
+				_(clash.status),
+			),
+			title=_("Duplicate Trip"),
+		)
 		self._validate_trip_items()
 		self._validate_one_item_per_trip()
 		self._validate_trip_qty()
@@ -95,8 +181,53 @@ class ThameenDeliveryTrip(DeliveryTrip):
 		self._set_trip_item_defaults()
 		self._set_transportation_item()
 		self._set_distance()
+		self._set_trip_duration()
 		self._set_pod_flag()
 		self._sync_header_summary()
+
+	def _sync_trip_route(self):
+		"""Keep Trip Route and the (Supply Source, Destination) pair equal.
+
+		The pair wins by default. Only an edit to the route ON AN EXISTING trip
+		overrides it, which is what a dispatcher changing the journey by hand
+		means. Everything that builds a trip in code — the Purchase Order
+		planner, the redirect buttons, the splitter — sets the pair directly,
+		and must not have it overwritten by a route the caller never chose.
+		"""
+		before = self.get_doc_before_save()
+		route = self.get("custom_trip_route")
+
+		route_edited = bool(route) and before is not None and before.get("custom_trip_route") != route
+		if route_edited:
+			if route not in ROUTE_MAP:
+				frappe.throw(_("{0} is not a valid Trip Route.").format(route))
+			self.custom_supply_source, self.custom_destination_type = ROUTE_MAP[route]
+			return
+
+		pair = (
+			self.get("custom_supply_source") or "Own Warehouse",
+			self.get("custom_destination_type") or "Customer",
+		)
+		derived = ROUTE_OF_PAIR.get(pair)
+
+		if derived:
+			self.custom_trip_route = derived
+		elif route in ROUTE_MAP:
+			# The pair is a combination with no route name; fall back to the
+			# route rather than blanking the field.
+			self.custom_supply_source, self.custom_destination_type = ROUTE_MAP[route]
+
+	def _set_trip_duration(self):
+		"""Actual hours on the road, from the stamped start and end."""
+		start = self.get("custom_trip_start")
+		end = self.get("custom_trip_end")
+
+		if start and end:
+			if get_datetime(end) < get_datetime(start):
+				frappe.throw(_("Trip End cannot be earlier than Trip Start."))
+			self.custom_trip_duration_hours = flt(time_diff_in_hours(end, start), 2)
+		else:
+			self.custom_trip_duration_hours = 0.0
 
 	def _set_transportation_item(self):
 		"""Resolve the freight charge item, falling back to the company default.
@@ -315,20 +446,74 @@ class ThameenDeliveryTrip(DeliveryTrip):
 				)
 
 	def _validate_vehicle_capacity(self):
+		"""A truck may not be planned above the space it has on that day.
+
+		Measured in STOCK units, because that is the unit Capacity is rated in —
+		comparing a bag count against a tonne rating was the old bug here.
+
+		Capacity is a per-journey limit, not a pool spread over the calendar, so
+		only trips sharing this one's departure date count against it. Turn
+		'Block Trips Above Vehicle Capacity' off in Thameen Fleet Settings to go
+		back to a warning.
+		"""
 		if not self.get("vehicle"):
 			return
-		total = sum(flt(row.qty) for row in (self.get("custom_trip_items") or []))
-		if not total:
+
+		rows = self.get("custom_trip_items") or []
+		total = sum(flt(row.qty) * (flt(row.conversion_factor) or 1) for row in rows)
+		if total <= QTY_TOLERANCE:
 			return
+
 		capacity = flt(frappe.get_cached_value("Vehicle", self.vehicle, "custom_capacity"))
-		if capacity and total > capacity:
-			frappe.msgprint(
-				_("Total planned qty {0} exceeds the rated capacity {1} of vehicle {2}.").format(
-					total, capacity, self.vehicle
-				),
-				indicator="orange",
+		if not capacity:
+			return
+
+		from thameen_erp.overrides.vehicle_load import get_committed_qty
+
+		# Only trips leaving the same day compete for the space. The same truck
+		# doing 10 today and 10 on Friday is two journeys, not 20 at once —
+		# counting them together made "same truck, one day apart" unsavable.
+		committed = get_committed_qty(
+			self.vehicle, exclude_trip=self.name, on_date=self.get("departure_time")
+		)
+		free = max(capacity - committed, 0.0)
+
+		if total <= free + QTY_TOLERANCE:
+			return
+
+		when = (
+			_(" leaving {0}").format(frappe.format(self.departure_time, {"fieldtype": "Date"}))
+			if self.get("departure_time")
+			else ""
+		)
+		message = _(
+			"{0} cannot carry this trip{1}. Planned {2}, free space {3} "
+			"(rated capacity {4}, already promised to other trips that day {5})."
+		).format(
+			frappe.bold(self.vehicle),
+			when,
+			flt(total, 2),
+			flt(free, 2),
+			flt(capacity, 2),
+			flt(committed, 2),
+		)
+
+		block = frappe.db.get_single_value("Thameen Fleet Settings", "block_trip_over_capacity")
+		if block is None:
+			block = 1
+
+		# The split and plan flows deliberately produce over-capacity trips and
+		# report them afterwards — blocking their own writes would make the fix
+		# for an overloaded trip impossible to apply.
+		if cint(block) and not self.flags.thameen_splitting:
+			frappe.throw(
+				message
+				+ " "
+				+ _("Reduce the quantity, choose a bigger truck, or use Split Into Trips."),
 				title=_("Over Capacity"),
 			)
+		else:
+			frappe.msgprint(message, indicator="orange", title=_("Over Capacity"))
 
 	def _set_pod_flag(self):
 		rows = [row for row in (self.get("custom_pod_documents") or []) if row.get("attachment")]
@@ -998,9 +1183,37 @@ def set_trip_status(trip, status):
 			frappe.throw(_("Attach at least one Proof of Delivery document before completing this trip."))
 
 	doc.db_set("status", status)
+	_stamp_trip_times(doc, status)
 
 	if status == "Completed":
 		doc.reload()
 		doc.close_trip()
 
 	return status
+
+
+def _stamp_trip_times(doc, status):
+	"""Record when the trip really started and finished.
+
+	Loading is the start — that is when the truck begins working, not when it
+	was scheduled to. Delivered is the end — the cement is off. Both are only
+	written if empty, so a corrected time entered by hand is never overwritten
+	by a later status change.
+	"""
+	updates = {}
+
+	if status == "Loading" and not doc.get("custom_trip_start"):
+		updates["custom_trip_start"] = now_datetime()
+
+	if status == "Delivered" and not doc.get("custom_trip_end"):
+		updates["custom_trip_end"] = now_datetime()
+
+	if not updates:
+		return
+
+	start = updates.get("custom_trip_start") or doc.get("custom_trip_start")
+	end = updates.get("custom_trip_end") or doc.get("custom_trip_end")
+	if start and end:
+		updates["custom_trip_duration_hours"] = flt(time_diff_in_hours(end, start), 2)
+
+	doc.db_set(updates, update_modified=False)

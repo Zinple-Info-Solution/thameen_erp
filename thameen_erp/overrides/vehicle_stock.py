@@ -191,9 +191,9 @@ def vehicle_query(doctype, txt, searchfield, start, page_len, filters):
 	vehicles = frappe.get_all(
 		"Vehicle",
 		filters=conditions,
-		fields=["name", "custom_capacity", "custom_available_qty", "custom_status",
+		fields=["name", "custom_capacity", "custom_status",
 		        "custom_vehicle_warehouse", "custom_assigned_driver"],
-		order_by="custom_available_qty desc, name",
+		order_by="name",
 		start=start,
 		page_length=page_len,
 	)
@@ -206,17 +206,34 @@ def vehicle_query(doctype, txt, searchfield, start, page_len, filters):
 			filters={"warehouse": ("in", warehouses), "actual_qty": (">", 0)},
 			fields=["warehouse", "item_code", "actual_qty"],
 		):
-			stock.setdefault(row.warehouse, []).append(f"{row.item_code} {flt(row.actual_qty, 2):g}")
+			stock.setdefault(row.warehouse, []).append((row.item_code, flt(row.actual_qty)))
+
+	# Free space is computed here, not read from Vehicle.custom_available_qty.
+	# That stored figure is a cache; if a hook missed, the picker would offer a
+	# truck that is actually full.
+	from thameen_erp.overrides.vehicle_load import _committed_by_vehicle
+
+	committed = _committed_by_vehicle([v.name for v in vehicles])
+	on_hand = {}
+	for wh, lines in stock.items():
+		on_hand[wh] = sum(flt(qty) for _code, qty in lines)
 
 	out = []
 	for v in vehicles:
-		on_truck = stock.get(v.custom_vehicle_warehouse) or []
+		items = stock.get(v.custom_vehicle_warehouse) or []
+		capacity = flt(v.custom_capacity)
+		used = max(flt(committed.get(v.name)), flt(on_hand.get(v.custom_vehicle_warehouse)))
+		free = max(capacity - used, 0.0) if capacity else 0.0
 		parts = [
 			_("{0}").format(v.custom_status or ""),
-			_("free {0} of {1}").format(flt(v.custom_available_qty, 2), flt(v.custom_capacity, 2)),
-			_("on truck: {0}").format(", ".join(on_truck)) if on_truck else _("on truck: empty"),
+			_("free {0} of {1}").format(flt(free, 2), flt(capacity, 2)),
+			_("on truck: {0}").format(
+				", ".join(f"{code} {qty:g}" for code, qty in items)
+			) if items else _("on truck: empty"),
 		]
 		out.append((v.name, " · ".join(p for p in parts if p)))
+
+	out.sort(key=lambda row: row[0])
 	return out
 
 
@@ -270,6 +287,7 @@ def preview_manual_load(vehicle, direction, warehouse, items):
 		"vehicle_warehouse": vehicle_wh,
 		"capacity": capacity,
 		"on_truck_now": on_truck_total,
+		"room_for": max(capacity - on_truck_total, 0.0) if capacity else 0.0,
 		"moving": total_moving,
 		"on_truck_after": max(after, 0.0),
 		"over_capacity": direction == "load" and bool(capacity) and after > capacity + QTY_TOLERANCE,
@@ -277,6 +295,54 @@ def preview_manual_load(vehicle, direction, warehouse, items):
 		"insufficient": bool(shortfalls),
 		"shortfalls": shortfalls,
 		"rows": rows,
+	}
+
+
+@frappe.whitelist()
+def find_stock_warehouse(item_code, company=None, exclude=None):
+	"""Which warehouse should this item be loaded from?
+
+	Picks the one holding the most, so the dispatcher does not have to guess.
+	Returns `None` for `warehouse` when the item is nowhere at all, which the
+	dialog turns into a plain "no stock anywhere" message instead of letting
+	the load fail later inside the Stock Entry.
+	"""
+	filters = {"item_code": item_code, "actual_qty": (">", 0)}
+	if exclude:
+		filters["warehouse"] = ("!=", exclude)
+
+	rows = frappe.get_all(
+		"Bin",
+		filters=filters,
+		fields=["warehouse", "actual_qty"],
+		order_by="actual_qty desc",
+		limit_page_length=20,
+	)
+
+	if company:
+		allowed = set(
+			frappe.get_all(
+				"Warehouse",
+				filters={"company": company, "is_group": 0},
+				pluck="name",
+			)
+		)
+		rows = [r for r in rows if r.warehouse in allowed]
+
+	# Never suggest another truck's warehouse as a yard to load from.
+	truck_warehouses = set(
+		frappe.get_all("Vehicle", filters={"custom_vehicle_warehouse": ("is", "set")},
+		               pluck="custom_vehicle_warehouse")
+	)
+	rows = [r for r in rows if r.warehouse not in truck_warehouses]
+
+	if not rows:
+		return {"warehouse": None, "qty": 0.0, "others": []}
+
+	return {
+		"warehouse": rows[0].warehouse,
+		"qty": flt(rows[0].actual_qty),
+		"others": [{"warehouse": r.warehouse, "qty": flt(r.actual_qty)} for r in rows[1:6]],
 	}
 
 
@@ -310,28 +376,22 @@ def manual_load(vehicle, direction, warehouse, items, allow_over_capacity=0, rem
 		)
 
 	if preview["over_capacity"]:
+		# A truck rated 20 holding 10 takes 10 more, not 20. Loading past that
+		# is refused unless the setting is deliberately switched on.
+		message = _("{0} holds {1} of {2} — room for {3} more, and this would load {4}.").format(
+			frappe.bold(vehicle),
+			flt(preview["on_truck_now"], 2),
+			flt(preview["capacity"], 2),
+			flt(preview["room_for"], 2),
+			flt(preview["moving"], 2),
+		)
 		allowed = cint(
 			frappe.db.get_single_value("Thameen Fleet Settings", "allow_over_capacity_manual_load")
 		)
 		if not allowed:
-			frappe.throw(
-				_("{0} would hold {1} after loading, above its rated capacity of {2}. "
-				  "Manual loading above capacity is switched off in Thameen Fleet Settings.").format(
-					frappe.bold(vehicle), flt(preview["on_truck_after"], 2), flt(preview["capacity"], 2)
-				),
-				title=_("Over Capacity"),
-			)
+			frappe.throw(message, title=_("Over Capacity"))
 		if not cint(allow_over_capacity):
-			frappe.throw(
-				_("{0} would hold {1} after loading — {2} over its rated capacity of {3}. "
-				  "Confirm the overload to continue.").format(
-					frappe.bold(vehicle),
-					flt(preview["on_truck_after"], 2),
-					flt(preview["over_by"], 2),
-					flt(preview["capacity"], 2),
-				),
-				title=_("Over Capacity"),
-			)
+			frappe.throw(message + " " + _("Confirm the overload to continue."), title=_("Over Capacity"))
 
 	vehicle_wh = preview["vehicle_warehouse"]
 	company = frappe.db.get_value("Warehouse", vehicle_wh, "company")
