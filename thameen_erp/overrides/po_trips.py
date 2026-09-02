@@ -88,13 +88,17 @@ def preview_po_trips(purchase_order):
 
 	from thameen_erp.overrides.vehicle_load import list_vehicles_for_planning
 
+	lines = pending_po_lines(po)
+
 	return {
 		"purchase_order": po.name,
 		"supplier": po.supplier,
 		"company": po.company,
 		"schedule_date": po.schedule_date,
-		"lines": pending_po_lines(po),
-		"vehicles": list_vehicles_for_planning(),
+		"lines": lines,
+		"vehicles": list_vehicles_for_planning(
+			items=[row.get("item_code") for row in lines if row.get("item_code")]
+		),
 		"default_warehouse": po.get("set_warehouse") or (po.items[0].warehouse if po.items else None),
 		"one_item_per_trip": bool(frappe.db.get_single_value("Thameen Fleet Settings", "one_item_per_trip")),
 	}

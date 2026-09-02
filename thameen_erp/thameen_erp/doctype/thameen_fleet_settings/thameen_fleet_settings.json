@@ -13,6 +13,7 @@
   "default_cement_supplier",
   "allow_over_capacity_manual_load",
   "block_trip_over_capacity",
+  "block_trip_without_stock",
   "sec_ops",
   "auto_create_delivery_trip",
   "auto_close_sales_order",
@@ -138,6 +139,13 @@
    "fieldname": "block_trip_over_capacity",
    "fieldtype": "Check",
    "label": "Block Trips Above Vehicle Capacity"
+  },
+  {
+   "default": "1",
+   "description": "Refuse to submit a trip the yard and truck together cannot fill. Direct-from-supplier trips are exempt — their stock is the Purchase Order.",
+   "fieldname": "block_trip_without_stock",
+   "fieldtype": "Check",
+   "label": "Block Trips Without Enough Stock"
   }
  ],
  "index_web_pages_for_search": 1,

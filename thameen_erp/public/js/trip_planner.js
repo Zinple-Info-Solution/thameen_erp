@@ -157,16 +157,19 @@ thameen.trip_planner._draw = function (dialog) {
 			.join("");
 	};
 
-	// What the chosen truck has, beside the row rather than inside the dropdown.
+	// What the chosen truck is physically carrying, named by its warehouse.
+	// The free-space figures are already on every option in the dropdown to
+	// the left, so repeating them here was the same numbers twice on one row.
 	const truck_state = (p) => {
 		if (!p.vehicle) return `<span class="text-muted">—</span>`;
 		const v = o.vehicles.find((x) => x.name === p.vehicle);
 		if (!v) return `<span class="text-muted">—</span>`;
 		if (!flt(v.capacity)) return `<span class="text-danger">${__("no capacity set")}</span>`;
-		const free = flt(v.free !== undefined ? v.free : v.available);
-		const bits = [`${__("free")} <b>${format_number(free)}</b> ${__("of")} ${format_number(v.capacity)}`];
-		if (flt(v.on_truck)) bits.push(`${__("on truck")} ${format_number(v.on_truck)}`);
-		return `<span class="small">${bits.join("<br>")}</span>`;
+		if (!flt(v.on_truck)) return `<span class="text-muted small">${__("empty")}</span>`;
+		return (
+			`<span class="small">${frappe.utils.escape_html(v.warehouse || p.vehicle)} ` +
+			`<b>${format_number(v.on_truck)}</b></span>`
+		);
 	};
 
 	const rows = plan
@@ -214,7 +217,7 @@ thameen.trip_planner._draw = function (dialog) {
 		<table class="table table-bordered small">
 			<thead><tr>
 				<th style="width:5%">#</th><th style="width:20%">${__("Line")}</th><th style="width:14%">${__("Qty")}</th>
-				<th>${__("Vehicle")}</th><th style="width:16%">${__("Truck space")}</th>
+				<th>${__("Vehicle")}</th><th style="width:16%">${__("Available stock")}</th>
 				<th style="width:14%">${__("Departure")}</th><th style="width:7%"></th>
 			</tr></thead>
 			<tbody>${rows}</tbody>

@@ -274,13 +274,15 @@ def preview_split(trip, vehicle=None, use_capacity=0):
 		"trip_count": len(loads),
 		"departure_time": doc.get("departure_time"),
 		"vehicles": list_vehicles_for_planning(
-			exclude_trip=trip, on_date=doc.get("departure_time")
+			exclude_trip=trip,
+			on_date=doc.get("departure_time"),
+			items=[row.item_code for row in (doc.get("custom_trip_items") or []) if row.item_code],
 		),
 	}
 
 
 @frappe.whitelist()
-def list_vehicles_for_planning(exclude_trip=None, on_date=None):
+def list_vehicles_for_planning(exclude_trip=None, on_date=None, items=None):
 	"""Plates with capacity / free space / on-truck, for the planning dialogs.
 
 	Every figure is computed here rather than read from the stored fields on
@@ -296,8 +298,16 @@ def list_vehicles_for_planning(exclude_trip=None, on_date=None):
 	A truck rated 20 with 10 already on it has 10 free, whether or not a trip
 	claims that 10. Pass `exclude_trip` so the trip being planned does not
 	count against itself.
+
+	Pass `items` (the trip's item codes) to drop trucks already carrying a
+	DIFFERENT cement — mixing grades in one tank contaminates both. Empty
+	trucks and trucks holding the same item are kept.
 	"""
 	from thameen_erp.overrides.vehicle_stock import get_vehicle_warehouse
+
+	if isinstance(items, str):
+		items = json.loads(items or "[]")
+	wanted = {code for code in (items or []) if code}
 
 	vehicles = frappe.get_all(
 		"Vehicle",
@@ -318,16 +328,43 @@ def list_vehicles_for_planning(exclude_trip=None, on_date=None):
 		[v.name for v in vehicles], exclude_trip=exclude_trip, on_date=on_date
 	)
 	on_truck = _stock_by_warehouse([v.warehouse for v in vehicles if v.warehouse])
+	by_item = _stock_items_by_warehouse([v.warehouse for v in vehicles if v.warehouse])
 
+	out = []
 	for v in vehicles:
+		lines = by_item.get(v.warehouse) or {}
+
+		# Already carrying a cement this trip does not need: not a candidate.
+		if wanted and any(code not in wanted for code in lines):
+			continue
+
 		v.committed = flt(committed.get(v.name))
 		v.on_truck = flt(on_truck.get(v.warehouse))
+		v.on_truck_items = [{"item_code": code, "qty": flt(qty)} for code, qty in sorted(lines.items())]
+		v.is_empty = not v.on_truck_items
 		v.free = max(flt(v.capacity) - max(v.committed, v.on_truck), 0.0) if v.capacity else 0.0
 		# Kept for callers written against the old key name.
 		v.available = v.free
+		out.append(v)
 
-	vehicles.sort(key=lambda v: (-flt(v.free), v.name))
-	return vehicles
+	out.sort(key=lambda v: (-flt(v.free), v.name))
+	return out
+
+
+def _stock_items_by_warehouse(warehouses):
+	"""{warehouse: {item_code: qty}} — what each truck is actually holding."""
+	if not warehouses:
+		return {}
+
+	rows = frappe.get_all(
+		"Bin",
+		filters={"warehouse": ("in", list(set(warehouses))), "actual_qty": (">", 0)},
+		fields=["warehouse", "item_code", "actual_qty"],
+	)
+	out = {}
+	for row in rows:
+		out.setdefault(row.warehouse, {})[row.item_code] = flt(row.actual_qty)
+	return out
 
 
 def _committed_by_vehicle(vehicles, exclude_trip=None, on_date=None):

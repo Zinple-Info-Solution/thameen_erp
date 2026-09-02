@@ -93,6 +93,19 @@ class ThameenDeliveryTrip(DeliveryTrip):
 		self._validate_no_duplicate_trip()
 		self._set_loading_warehouse()
 		self._recompute()
+		self._validate_trip_items()
+		self._validate_one_item_per_trip()
+		self._validate_trip_qty()
+		self._validate_vehicle_capacity()
+		self._validate_vehicle_item_conflict()
+		self._validate_stock_available()
+		self._validate_transport_type()
+		self._validate_supply_source()
+		self._validate_destination()
+		self._set_trip_source()
+
+		# ERPNext: requires a driver to submit, resolves stop addresses.
+		super().validate()
 
 	def _set_loading_warehouse(self):
 		"""Fill the yard the truck loads from, when it is obvious.
@@ -150,24 +163,13 @@ class ThameenDeliveryTrip(DeliveryTrip):
 			return
 
 		frappe.throw(
-			_("{0} already has trip {1} ({2}) departing at exactly this time. Change the departure time or the vehicle.").format(
+			_("{0} already has a trip {1} ({2}) scheduled at this time. Please change the departure time or select another vehicle.").format(
 				frappe.bold(self.vehicle),
 				get_link_to_form("Delivery Trip", clash.name),
 				_(clash.status),
 			),
 			title=_("Duplicate Trip"),
 		)
-		self._validate_trip_items()
-		self._validate_one_item_per_trip()
-		self._validate_trip_qty()
-		self._validate_vehicle_capacity()
-		self._validate_transport_type()
-		self._validate_supply_source()
-		self._validate_destination()
-		self._set_trip_source()
-
-		# ERPNext: requires a driver to submit, resolves stop addresses.
-		super().validate()
 
 	def before_update_after_submit(self):
 		"""Frappe does NOT run `validate` on a post-submit save — only this hook.
@@ -466,6 +468,15 @@ class ThameenDeliveryTrip(DeliveryTrip):
 
 		capacity = flt(frappe.get_cached_value("Vehicle", self.vehicle, "custom_capacity"))
 		if not capacity:
+			# An unrated truck used to skip every check below it, so a trip of
+			# any size could be submitted onto it. A draft may still name one —
+			# the rating is often filled in later — but it cannot go out.
+			if self._action == "submit":
+				frappe.throw(
+					_("{0} has no Capacity set, so there is no way to tell whether this trip fits. "
+					  "Set Capacity on the Vehicle first.").format(frappe.bold(self.vehicle)),
+					title=_("Vehicle Not Rated"),
+				)
 			return
 
 		from thameen_erp.overrides.vehicle_load import get_committed_qty
@@ -486,17 +497,32 @@ class ThameenDeliveryTrip(DeliveryTrip):
 			if self.get("departure_time")
 			else ""
 		)
-		message = _(
-			"{0} cannot carry this trip{1}. Planned {2}, free space {3} "
-			"(rated capacity {4}, already promised to other trips that day {5})."
-		).format(
-			frappe.bold(self.vehicle),
-			when,
-			flt(total, 2),
-			flt(free, 2),
-			flt(capacity, 2),
-			flt(committed, 2),
-		)
+
+		# No room at all reads differently from "a bit too much". Splitting
+		# cannot help a truck with zero free space — every load would still
+		# need somewhere to go — so the advice is different too.
+		if free <= QTY_TOLERANCE:
+			message = _(
+				"{0} has no free space{1}. Rated {2}, and {3} is already promised or loaded. "
+				"Unload it, pick another truck, or move this trip to another day."
+			).format(
+				frappe.bold(self.vehicle),
+				when,
+				flt(capacity, 2),
+				flt(max(committed, capacity - free), 2),
+			)
+		else:
+			message = _(
+				"{0} cannot carry this trip{1}. Planned {2}, free space {3} "
+				"(rated capacity {4}, already promised to other trips that day {5})."
+			).format(
+				frappe.bold(self.vehicle),
+				when,
+				flt(total, 2),
+				flt(free, 2),
+				flt(capacity, 2),
+				flt(committed, 2),
+			)
 
 		block = frappe.db.get_single_value("Thameen Fleet Settings", "block_trip_over_capacity")
 		if block is None:
@@ -514,6 +540,133 @@ class ThameenDeliveryTrip(DeliveryTrip):
 			)
 		else:
 			frappe.msgprint(message, indicator="orange", title=_("Over Capacity"))
+
+	def _validate_vehicle_item_conflict(self):
+		"""A truck already carrying a different cement cannot take this trip.
+
+		Mixing grades in one tank contaminates both loads. The vehicle picker
+		hides such trucks, but a trip can also arrive from the API, an import
+		or the Purchase Order planner, and the truck can be loaded by hand
+		after the trip was planned — so the rule is enforced here as well as
+		offered in the dropdown.
+
+		Only at submit: a draft may name a truck that is still being unloaded.
+		"""
+		if self._action != "submit" or not self.get("vehicle"):
+			return
+
+		wanted = {row.item_code for row in (self.get("custom_trip_items") or []) if row.item_code}
+		if not wanted:
+			return
+
+		warehouse = frappe.db.get_value("Vehicle", self.vehicle, "custom_vehicle_warehouse")
+		if not warehouse:
+			return
+
+		foreign = frappe.get_all(
+			"Bin",
+			filters={"warehouse": warehouse, "actual_qty": (">", 0), "item_code": ("not in", list(wanted))},
+			fields=["item_code", "actual_qty"],
+		)
+		if not foreign:
+			return
+
+		frappe.throw(
+			_("{0} is already carrying {1}, which is not on this trip. Unload the truck first, "
+			  "or choose another vehicle.").format(
+				frappe.bold(self.vehicle),
+				", ".join(f"{row.item_code} {flt(row.actual_qty, 2)}" for row in foreign),
+			),
+			title=_("Different Item on Truck"),
+		)
+
+	def _validate_stock_available(self):
+		"""A trip may not be submitted if nothing can fill it.
+
+		Measured the same way the Check Stock button measures it: what is
+		already on the truck and unclaimed by another loaded trip, plus what
+		the row's loading warehouse holds. Both in STOCK units.
+
+		Only at submit. A draft is a plan — the cement is often still being
+		bought while dispatch builds it, and blocking the save would make the
+		trip impossible to write down.
+
+		Direct-from-supplier trips are exempt: their stock is the Purchase
+		Order, not the yard, and _validate_supply_source already requires a
+		submitted PO before they can go.
+
+		Turn 'Block Trips Without Enough Stock' off in Thameen Fleet Settings
+		to get a warning instead of a refusal.
+		"""
+		if self._action != "submit":
+			return
+		if self.get("custom_supply_source") == "Direct from Supplier":
+			return
+
+		rows = [row for row in (self.get("custom_trip_items") or []) if flt(row.qty) > 0]
+		if not rows:
+			return
+
+		# What is on the truck and not already promised to another loaded trip.
+		free = (
+			free_truck_stock(self.vehicle, {row.item_code for row in rows}, exclude_trip=self.name)
+			if self.get("vehicle")
+			else {}
+		)
+
+		used_truck = {}
+		used_source = {}
+		shortfalls = []
+
+		for row in rows:
+			needed = flt(row.qty) * (flt(row.conversion_factor) or 1)
+			source = row.source_warehouse or self.get("custom_loading_warehouse")
+
+			# Rows of the same item share one truck balance and one yard
+			# balance — walk them in order so the second row cannot spend the
+			# same cement the first already took.
+			on_truck = max(flt(free.get(row.item_code)) - flt(used_truck.get(row.item_code)), 0.0)
+			from_truck = min(needed, on_truck)
+			used_truck[row.item_code] = flt(used_truck.get(row.item_code)) + from_truck
+
+			key = (row.item_code, source)
+			in_yard = max(_bin_qty(row.item_code, source) - flt(used_source.get(key)), 0.0)
+			from_source = min(needed - from_truck, in_yard)
+			used_source[key] = flt(used_source.get(key)) + from_source
+
+			short = needed - from_truck - from_source
+			if short > QTY_TOLERANCE:
+				shortfalls.append(
+					_("Row {0} ({1}): need {2}, have {3} on {4} and {5} in {6} — short {7}.").format(
+						row.idx,
+						row.item_code,
+						flt(needed, 2),
+						flt(from_truck, 2),
+						self.get("vehicle") or _("the truck"),
+						flt(from_source, 2),
+						source or _("no warehouse set"),
+						flt(short, 2),
+					)
+				)
+
+		if not shortfalls:
+			return
+
+		message = _("There is not enough stock to fill this trip.") + "<br><br>" + "<br>".join(shortfalls)
+
+		block = frappe.db.get_single_value("Thameen Fleet Settings", "block_trip_without_stock")
+		if block is None:
+			block = 1
+
+		if cint(block):
+			frappe.throw(
+				message
+				+ "<br><br>"
+				+ _("Reduce the quantity, load the truck first, or raise a Purchase Order for the shortfall."),
+				title=_("Not Enough Stock"),
+			)
+		else:
+			frappe.msgprint(message, indicator="orange", title=_("Not Enough Stock"))
 
 	def _set_pod_flag(self):
 		rows = [row for row in (self.get("custom_pod_documents") or []) if row.get("attachment")]
@@ -594,8 +747,8 @@ class ThameenDeliveryTrip(DeliveryTrip):
 				  "Use Create > Purchase Order on the trip.")
 			)
 		if self.get("custom_purchase_order"):
-			po_supplier, docstatus = frappe.db.get_value(
-				"Purchase Order", self.custom_purchase_order, ["supplier", "docstatus"]
+			po_supplier, docstatus, po_status = frappe.db.get_value(
+				"Purchase Order", self.custom_purchase_order, ["supplier", "docstatus", "status"]
 			)
 			if po_supplier != self.custom_supplier:
 				frappe.throw(
@@ -605,6 +758,68 @@ class ThameenDeliveryTrip(DeliveryTrip):
 				)
 			if docstatus == 2:
 				frappe.throw(_("Purchase Order {0} is cancelled.").format(self.custom_purchase_order))
+
+			if self._action == "submit":
+				# A direct trip has no yard stock behind it — the Purchase
+				# Order IS its stock. A draft PO is not a commitment to
+				# anything, so letting the trip go on one meant a truck could
+				# be sent to collect cement nobody had actually bought.
+				if docstatus != 1:
+					frappe.throw(
+						_("Purchase Order {0} is still a draft. The buyer must submit it before "
+						  "this trip can go — it is the only thing backing the cement.").format(
+							get_link_to_form("Purchase Order", self.custom_purchase_order)
+						),
+						title=_("Purchase Order Not Submitted"),
+					)
+				if po_status in ("Closed", "Cancelled"):
+					frappe.throw(
+						_("Purchase Order {0} is {1}, so it cannot supply this trip.").format(
+							get_link_to_form("Purchase Order", self.custom_purchase_order),
+							_(po_status),
+						),
+						title=_("Purchase Order Closed"),
+					)
+				self._validate_po_pending_qty()
+
+	def _validate_po_pending_qty(self):
+		"""A direct trip may not collect more than the PO still has outstanding.
+
+		Only rows carrying a `po_detail` are checked — a row without one has no
+		line to measure against, and blocking it would break trips built before
+		the link existed.
+		"""
+		rows = [row for row in (self.get("custom_trip_items") or []) if row.get("po_detail")]
+		if not rows:
+			return
+
+		lines = {
+			d.name: d
+			for d in frappe.get_all(
+				"Purchase Order Item",
+				filters={"name": ("in", list({row.po_detail for row in rows}))},
+				fields=["name", "item_code", "qty", "received_qty", "parent"],
+			)
+		}
+
+		for row in rows:
+			line = lines.get(row.po_detail)
+			if not line:
+				continue
+			outstanding = flt(line.qty) - flt(line.received_qty)
+			needed = flt(row.qty) * (flt(row.conversion_factor) or 1)
+			if needed > outstanding + QTY_TOLERANCE:
+				frappe.throw(
+					_("Row {0} ({1}): this trip collects {2}, but only {3} is still outstanding on "
+					  "{4}. Reduce the quantity or increase the order.").format(
+						row.idx,
+						row.item_code,
+						flt(needed, 2),
+						flt(outstanding, 2),
+						get_link_to_form("Purchase Order", line.parent),
+					),
+					title=_("More Than the Order"),
+				)
 
 	def _sync_header_summary(self):
 		"""Keep the legacy header fields readable for old reports and list views."""
@@ -1044,6 +1259,15 @@ def _ensure_masters(vehicle):
 	warehouse = frappe.db.get_value("Vehicle", vehicle, "custom_vehicle_warehouse")
 	if not warehouse:
 		ensure_vehicle_masters(frappe.get_doc("Vehicle", vehicle))
+
+
+def _bin_qty(item_code, warehouse):
+	"""Physical stock of one item in one warehouse, straight from Bin."""
+	if not (item_code and warehouse):
+		return 0.0
+	return flt(
+		frappe.db.get_value("Bin", {"item_code": item_code, "warehouse": warehouse}, "actual_qty")
+	)
 
 
 def _find_so_detail(sales_order, item_code):

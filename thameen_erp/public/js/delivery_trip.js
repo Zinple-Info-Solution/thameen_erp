@@ -41,10 +41,16 @@ frappe.ui.form.on("Delivery Trip", {
 			filters: { docstatus: 1, status: ["not in", ["Closed", "Completed", "Cancelled"]] },
 		}));
 		// Custom query so every plate in the dropdown shows its free space and
-		// what is physically on the truck right now.
+		// what is physically on the truck right now. `items` hides trucks
+		// already carrying a different cement; `trip` stops this trip
+		// counting against its own truck when free space is worked out.
 		frm.set_query("vehicle", () => ({
 			query: "thameen_erp.overrides.vehicle_stock.vehicle_query",
-			filters: { custom_status: ["in", ["Available", "Assigned"]] },
+			filters: {
+				custom_status: ["in", ["Available", "Assigned"]],
+				items: distinct_items(frm),
+				trip: frm.is_new() ? null : frm.doc.name,
+			},
 		}));
 
 		frm.set_query("custom_purchase_order", () => ({
@@ -102,8 +108,6 @@ frappe.ui.form.on("Delivery Trip", {
 			add_split_trip_button(frm);
 			add_split_by_item_button(frm);
 			add_procurement_buttons(frm);
-			check_vehicle_load(frm, { prompt: false });
-			check_trip_stock(frm, { prompt: false });
 			return;
 		}
 		if (frm.doc.docstatus !== 1) return;
@@ -112,8 +116,6 @@ frappe.ui.form.on("Delivery Trip", {
 		show_progress(frm);
 		add_view_buttons(frm);
 		add_procurement_buttons(frm);
-		check_vehicle_load(frm, { prompt: false });
-		check_trip_stock(frm, { prompt: false });
 	},
 
 	after_save(frm) {
@@ -160,11 +162,7 @@ frappe.ui.form.on("Delivery Trip", {
 				if (message.last_odometer && !frm.doc.custom_starting_odometer) {
 					frm.set_value("custom_starting_odometer", message.last_odometer);
 				}
-				// The full load check replaces the old capacity-only comment:
-				// it also accounts for what other open trips already hold.
-				check_vehicle_load(frm, { prompt: true });
-				// And: is the cement actually there — on the truck or in the yard?
-				if (!frm.is_new()) check_trip_stock(frm, { prompt: true });
+				after_vehicle_chosen(frm);
 			});
 	},
 
@@ -422,18 +420,115 @@ function check_vehicle_load(frm, opts) {
 		callback({ message }) {
 			if (!message || !message.has_capacity) {
 				if (opts.prompt && message && !message.has_capacity) {
-					frm.dashboard.add_comment(
-						__("{0} has no Capacity set, so the load cannot be checked.", [frm.doc.vehicle]),
-						"orange",
-						true
-					);
+					frappe.msgprint({
+						title: __("Vehicle Not Rated"),
+						indicator: "orange",
+						message: __(
+							"{0} has no Capacity set, so the load cannot be checked. Set Capacity on the Vehicle — the trip will not submit without it.",
+							[frm.doc.vehicle]
+						),
+					});
 				}
 				return;
 			}
 
-			if (!message.fits && opts.prompt && frm.doc.docstatus === 0) {
-				offer_split(frm, message);
+			if (message.fits || !opts.prompt || frm.doc.docstatus !== 0) return;
+
+			// Zero free space is not "a bit too much" — splitting cannot fix
+			// it, because every load would still need somewhere to go. Say so
+			// instead of opening a split plan that cannot balance.
+			if (flt(message.available_qty) <= 0.001) {
+				show_no_room(frm, message);
+				return;
 			}
+
+			offer_split(frm, message);
+		},
+	});
+}
+
+function show_no_room(frm, load) {
+	const holding = (load.on_truck_items || [])
+		.map((i) => `${frappe.utils.escape_html(i.item_code)} ${format_number(i.qty)}`)
+		.join(", ");
+
+	const html = `<p>${__("{0} has no free space, so nothing can be planned onto it.", [
+		`<b>${frappe.utils.escape_html(frm.doc.vehicle)}</b>`,
+	])}</p>
+	<table class="table table-bordered small">
+		<tbody>
+			<tr><td>${__("Rated capacity")}</td><td class="text-right">${format_number(load.capacity)}</td></tr>
+			<tr><td>${__("Physically on truck")}</td><td class="text-right">${format_number(load.on_truck_qty)}</td></tr>
+			<tr><td>${__("Promised to other trips")}</td><td class="text-right">${format_number(load.committed_qty)}</td></tr>
+			<tr><td><b>${__("Free")}</b></td><td class="text-right"><b>0</b></td></tr>
+		</tbody>
+	</table>
+	${holding ? `<p class="small text-muted">${__("Currently carrying")}: ${holding}</p>` : ""}
+	<p class="small text-muted">${__(
+		"Unload the truck, choose another vehicle, or move this trip to a day when the truck is free."
+	)}</p>`;
+
+	const d = new frappe.ui.Dialog({
+		title: __("No Room on Truck"),
+		fields: [{ fieldtype: "HTML", options: html }],
+		primary_action_label: __("Open Vehicle"),
+		primary_action() {
+			d.hide();
+			frappe.set_route("Form", "Vehicle", frm.doc.vehicle);
+		},
+	});
+	d.show();
+}
+
+// ---------------------------------------------------------------------------
+// One truck chosen, one dialog at most
+//
+// Two different questions get asked when a vehicle is picked, and they have a
+// strict order:
+//
+//   1. Is the cement THERE?   — yard + truck, via check_trip_stock
+//   2. Does it FIT?           — capacity, via check_vehicle_load
+//
+// Stock wins. Splitting a trip you cannot fill is busywork: the split just
+// turns one unfillable trip into three, and the dispatcher still has to go and
+// buy the cement. So when stock is short the Insufficient Stock dialog opens
+// on its own and the split is not offered at all. Only once the cement exists
+// does "it will not fit on one truck" become the real problem.
+//
+// They also used to fire as two parallel calls, so whichever server response
+// landed second threw its dialog on top of the first. Now they are sequenced.
+// ---------------------------------------------------------------------------
+
+function after_vehicle_chosen(frm) {
+	if (!frm.doc.vehicle || frm.doc.docstatus !== 0) return;
+	if (!(frm.doc.custom_trip_items || []).length) return;
+
+	// A trip that has never been saved has no rows server-side to check.
+	if (frm.is_new()) {
+		check_vehicle_load(frm, { prompt: true });
+		return;
+	}
+
+	frappe.call({
+		method: "thameen_erp.overrides.procurement.check_trip_stock",
+		args: { trip: frm.doc.name, vehicle: frm.doc.vehicle },
+		callback({ message }) {
+			if (!message) return;
+
+			// Nothing to fill the trip with. This dialog, and only this one —
+			// a direct trip says so in its own words, because its stock is a
+			// Purchase Order rather than a yard.
+			if (!message.sufficient) {
+				if (message.supply_source === "Direct from Supplier") {
+					show_direct_supply_check(frm, message);
+				} else {
+					offer_procurement(frm, message);
+				}
+				return;
+			}
+
+			// Cement exists. Now: is there room on this truck for it?
+			check_vehicle_load(frm, { prompt: true });
 		},
 	});
 }
@@ -457,22 +552,11 @@ function offer_split(frm, load) {
 		: "";
 
 
-	// One line of numbers, no prose. The plan table below says the rest.
-	const summary = `
-		<div class="mb-2">
-			<b>${frappe.utils.escape_html(frm.doc.vehicle)}</b>
-			· ${__("capacity")} ${format_number(load.capacity)}
-			· ${__("free")} <b>${format_number(load.available_qty)}</b>
-			· ${__("this trip")} ${format_number(load.planned_qty)}
-			· <span class="text-danger">${__("over by")} ${format_number(load.overflow_qty)}</span>
-		</div>
-		${why}`;
-
 	const dialog = new frappe.ui.Dialog({
-		title: __("Not Enough Room"),
+		title: __("Split Trip"),
 		size: "extra-large",
 		fields: [
-			{ fieldtype: "HTML", fieldname: "summary", options: summary },
+			{ fieldtype: "HTML", fieldname: "summary", options: why },
 			{
 				fieldname: "use_capacity",
 				fieldtype: "Check",
@@ -697,9 +781,18 @@ function vehicle_select_html(dialog, value, cls, index) {
 				.filter((v) => v.name === value || !taken.has(v.name))
 				.map((v) => {
 					const free = flt(v.free !== undefined ? v.free : v.available);
+					// What it is carrying, so an empty truck is obvious at a
+					// glance. Trucks holding a different cement are already
+					// filtered out server-side.
+					const holding = (v.on_truck_items || []).length
+						? (v.on_truck_items || [])
+								.map((i) => `${i.item_code} ${format_number(i.qty)}`)
+								.join(", ")
+						: __("empty");
 					return (
 						`<option value="${frappe.utils.escape_html(v.name)}" ${v.name === value ? "selected" : ""}>` +
-						`${frappe.utils.escape_html(v.name)} · ${__("cap")} ${format_number(v.capacity)} · ${__("free")} ${format_number(free)}</option>`
+						`${frappe.utils.escape_html(v.name)} · ${__("free")} ${format_number(free)} ${__("of")} ${format_number(v.capacity)}` +
+						` · ${frappe.utils.escape_html(holding)}</option>`
 					);
 				})
 		)
@@ -707,19 +800,26 @@ function vehicle_select_html(dialog, value, cls, index) {
 	return `<select class="form-control input-xs ${cls}" data-index="${index}">${opts}</select>`;
 }
 
-// What the chosen truck actually has, shown beside the row so the dispatcher
-// does not have to reopen the dropdown to check.
+// What the chosen truck is physically carrying, named by its warehouse. The
+// free-space figures are already on every option in the Vehicle dropdown, so
+// repeating them here was the same numbers twice on one row.
 function vehicle_state_html(dialog, load) {
 	if (!load.vehicle) return `<span class="text-muted">—</span>`;
 	const v = vehicle_of(dialog, load.vehicle);
 	if (!v) return `<span class="text-muted">—</span>`;
 	if (!flt(v.capacity)) return `<span class="text-danger small">${__("no capacity set")}</span>`;
+	if (!flt(v.on_truck)) return `<span class="text-muted small">${__("empty")}</span>`;
 
-	const free = flt(v.free !== undefined ? v.free : v.available);
-	const bits = [`${__("free")} <b>${format_number(free)}</b> ${__("of")} ${format_number(v.capacity)}`];
-	if (flt(v.on_truck)) bits.push(`${__("on truck")} ${format_number(v.on_truck)}`);
-	if (flt(v.committed)) bits.push(`${__("committed")} ${format_number(v.committed)}`);
-	return `<span class="small">${bits.join("<br>")}</span>`;
+	const lines = (v.on_truck_items || []).length
+		? (v.on_truck_items || [])
+				.map((i) => `${frappe.utils.escape_html(i.item_code)} <b>${format_number(i.qty)}</b>`)
+				.join("<br>")
+		: `<b>${format_number(v.on_truck)}</b>`;
+
+	return (
+		`<span class="small">${frappe.utils.escape_html(v.warehouse || load.vehicle)}<br>` +
+		`${lines}</span>`
+	);
 }
 
 function render_plan(frm, dialog) {
@@ -809,7 +909,7 @@ function render_plan(frm, dialog) {
 				<th>${__("Items & qty")}</th>
 				<th class="text-right" style="width:9%">${__("Total")}</th>
 				<th style="width:24%">${__("Vehicle")}</th>
-				<th style="width:16%">${__("Truck space")}</th>
+				<th style="width:16%">${__("Available stock")}</th>
 				<th style="width:13%">${__("Departure")}</th>
 			</tr></thead>
 			<tbody>${rows}</tbody>
@@ -817,7 +917,15 @@ function render_plan(frm, dialog) {
 		<div class="small mb-2">${balance_html}</div>
 		${warning}`);
 
-	dialog.get_primary_btn().prop("disabled", !balanced || first_empty);
+	// A row carrying more than its truck can hold is not a plan, it is the
+	// same problem moved sideways. The rows are already flagged in red above;
+	// this stops the button acting on them.
+	const any_over = plan.some((l) => {
+		const free = vehicle_free(dialog, l.vehicle);
+		return free !== null && load_total(l) > free + PLAN_TOL;
+	});
+
+	dialog.get_primary_btn().prop("disabled", !balanced || first_empty || any_over);
 
 	wrapper.find(".plan-qty").on("change", function () {
 		const index = parseInt($(this).data("index"), 10);
@@ -1156,66 +1264,137 @@ function add_split_by_item_button(frm) {
 // discover an empty yard at loading time.
 // ---------------------------------------------------------------------------
 
+// Two callers, two behaviours.
+//
+//   auto (vehicle chosen)  silent when the trip is covered; opens the
+//                          Insufficient Stock dialog when it is not.
+//   show (Check Stock)     always opens the full per-row table.
+//
+// The old red "Stock check — NOT covered" dashboard banner is gone either way:
+// it repainted on every refresh whether or not anyone had asked.
 function check_trip_stock(frm, opts) {
 	opts = opts || {};
 	if (frm.is_new() || frm.doc.docstatus > 1) return;
-	if (!(frm.doc.custom_trip_items || []).length) return;
-	if (frm.doc.docstatus === 1 && !["Scheduled"].includes(frm.doc.status)) return;
+	if (!(frm.doc.custom_trip_items || []).length) {
+		if (opts.show) frappe.msgprint(__("Add an item to the trip first."));
+		return;
+	}
 
 	frappe.call({
 		method: "thameen_erp.overrides.procurement.check_trip_stock",
 		args: { trip: frm.doc.name, vehicle: frm.doc.vehicle },
+		freeze: !!opts.show,
 		callback({ message }) {
 			if (!message) return;
-			render_stock_indicator(frm, message);
-			if (!message.sufficient && opts.prompt && frm.doc.docstatus === 0) {
-				if (message.supply_source === "Direct from Supplier") return;
-				offer_procurement(frm, message);
+
+			if (opts.show) {
+				show_stock_check(frm, message);
+				return;
 			}
+
+			// Covered — say nothing at all.
+			if (message.sufficient) return;
+			if (message.supply_source === "Direct from Supplier") return;
+			if (frm.doc.docstatus !== 0) return;
+			offer_procurement(frm, message);
 		},
 	});
 }
 
-function render_stock_indicator(frm, check) {
+// Warehouse name and qty per row. A bare "short 50" never told anyone which
+// yard to send the truck to, which is the only reason to open this.
+function show_stock_check(frm, check) {
 	if (check.supply_source === "Direct from Supplier") {
-		const po = check.purchase_order;
-		let text, colour;
-		if (!po) {
-			text = __("Direct from supplier — no Purchase Order yet. Use Create > Purchase Order.");
-			colour = "red";
-		} else if (check.po_docstatus === 0) {
-			text = __("Direct from supplier — {0} is still a draft. The buyer must submit it before loading.", [
-				frappe.utils.get_form_link("Purchase Order", po, true),
-			]);
-			colour = "orange";
-		} else if (!check.sufficient) {
-			text = __("Direct from supplier — {0} is {1}.", [frappe.utils.get_form_link("Purchase Order", po, true), check.po_status]);
-			colour = "red";
-		} else {
-			text = __("Direct from supplier — {0} submitted. Loading will receive the cement straight onto the truck.", [
-				frappe.utils.get_form_link("Purchase Order", po, true),
-			]);
-			colour = "green";
-		}
-		frm.dashboard.add_comment(text, colour, true);
+		show_direct_supply_check(frm, check);
 		return;
 	}
 
 	const rows = (check.rows || [])
-		.map((r) => {
-			const bits = [];
-			if (r.on_truck_free) bits.push(__("{0} on truck", [format_number(r.on_truck_free)]));
-			if (r.from_source) bits.push(__("{0} in {1}", [format_number(r.from_source), frappe.utils.escape_html(r.source_warehouse || "")]));
-			if (r.shortfall) bits.push(`<b>${__("short {0}", [format_number(r.shortfall)])}</b>`);
-			return `${frappe.utils.escape_html(r.item_code)} ${format_number(r.planned_qty)}: ${bits.join(", ") || __("nothing available")}`;
-		})
-		.join("<br>");
+		.map(
+			(r) => `<tr class="${r.shortfall ? "table-danger" : ""}">
+				<td>${frappe.utils.escape_html(r.item_code)}</td>
+				<td class="text-right">${format_number(r.planned_qty)}</td>
+				<td>${r.on_truck_free ? frappe.utils.escape_html(frm.doc.vehicle || "") : ""}</td>
+				<td class="text-right">${r.on_truck_free ? format_number(r.on_truck_free) : "—"}</td>
+				<td>${frappe.utils.escape_html(r.source_warehouse || "")}</td>
+				<td class="text-right">${r.from_source ? format_number(r.from_source) : "—"}</td>
+				<td class="text-right">${r.shortfall ? `<b>${format_number(r.shortfall)}</b>` : "—"}</td>
+			</tr>`
+		)
+		.join("");
 
-	frm.dashboard.add_comment(
-		(check.sufficient ? __("Stock check — covered.") : __("Stock check — NOT covered.")) + `<br><span class="small">${rows}</span>`,
-		check.sufficient ? "green" : "red",
-		true
-	);
+	const html = `<table class="table table-bordered small">
+		<thead><tr>
+			<th>${__("Item")}</th>
+			<th class="text-right">${__("Planned")}</th>
+			<th>${__("Vehicle")}</th>
+			<th class="text-right">${__("On truck")}</th>
+			<th>${__("Warehouse")}</th>
+			<th class="text-right">${__("In warehouse")}</th>
+			<th class="text-right">${__("Short")}</th>
+		</tr></thead>
+		<tbody>${rows}</tbody>
+	</table>`;
+
+	const d = new frappe.ui.Dialog({
+		title: check.sufficient ? __("Stock check — covered") : __("Stock check — not covered"),
+		size: "large",
+		fields: [{ fieldtype: "HTML", options: html }],
+	});
+
+	if (!check.sufficient && frm.doc.docstatus === 0) {
+		d.set_primary_action(__("Order Shortfall…"), () => {
+			d.hide();
+			offer_procurement(frm, check);
+		});
+	}
+	d.show();
+}
+
+function show_direct_supply_check(frm, check) {
+	const po = check.purchase_order;
+	let text;
+	if (!po) {
+		text = __("This trip collects straight from the supplier, but it has no Purchase Order yet. The Purchase Order is the only thing backing the cement — the trip will not submit without one.");
+	} else if (check.po_docstatus === 0) {
+		text = __("{0} is still a draft. The buyer must submit it before this trip can go.", [
+			frappe.utils.get_form_link("Purchase Order", po, true),
+		]);
+	} else if (!check.sufficient) {
+		text = __("{0} is {1}, so it cannot supply this trip.", [
+			frappe.utils.get_form_link("Purchase Order", po, true),
+			check.po_status,
+		]);
+	} else {
+		text = __("{0} is submitted. Loading will receive the cement straight onto the truck.", [
+			frappe.utils.get_form_link("Purchase Order", po, true),
+		]);
+	}
+
+	const d = new frappe.ui.Dialog({
+		title: check.sufficient ? __("Direct from supplier") : __("No Stock Behind This Trip"),
+		fields: [{ fieldtype: "HTML", options: `<p>${text}</p>` }],
+	});
+
+	if (po) {
+		d.set_primary_action(__("Open Purchase Order"), () => {
+			d.hide();
+			frappe.set_route("Form", "Purchase Order", po);
+		});
+	} else if (frm.doc.docstatus === 0 && frm.doc.custom_supplier) {
+		d.set_primary_action(__("Create Purchase Order"), () => {
+			frappe.call({
+				method: "thameen_erp.overrides.procurement.make_purchase_order",
+				args: { trip: frm.doc.name, supplier: frm.doc.custom_supplier, mode: "direct" },
+				freeze: true,
+				callback() {
+					d.hide();
+					frm.reload_doc();
+				},
+			});
+		});
+	}
+	d.show();
 }
 
 function offer_procurement(frm, check) {
@@ -1312,7 +1491,7 @@ function offer_procurement(frm, check) {
 function add_procurement_buttons(frm) {
 	if (frm.is_new()) return;
 
-	frm.add_custom_button(__("Check Stock"), () => check_trip_stock(frm, { prompt: true }));
+	frm.add_custom_button(__("Check Stock"), () => check_trip_stock(frm, { show: true }));
 
 	if (frm.doc.custom_purchase_order) {
 		frm.add_custom_button(

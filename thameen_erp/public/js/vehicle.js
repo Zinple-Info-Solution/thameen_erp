@@ -237,8 +237,6 @@ function open_load_dialog(frm, direction) {
 				}),
 				onchange: () => refresh_preview(frm, dialog, direction),
 			},
-			{ fieldtype: "Column Break" },
-			{ fieldtype: "HTML", fieldname: "truck_now" },
 			{ fieldtype: "Section Break" },
 			{
 				fieldname: "items",
@@ -286,19 +284,14 @@ function open_load_dialog(frm, direction) {
 	});
 
 	// Pre-fill the table with what is on the truck for an unload, so the
-	// usual "bring everything back" is two clicks.
+	// usual "bring everything back" is two clicks. What is on the truck is
+	// no longer echoed into the dialog — the Truck Stock button shows it, and
+	// for an unload the prefilled rows below say the same thing.
 	frappe.call({
 		method: "thameen_erp.overrides.vehicle_stock.get_truck_stock_summary",
 		args: { vehicle: frm.doc.name },
 		callback({ message }) {
 			const items = (message && message.items) || [];
-			const now = items.length
-				? items.map((i) => `${frappe.utils.escape_html(i.item_code)} ${format_number(i.qty)} ${frappe.utils.escape_html(i.stock_uom || "")}`).join("<br>")
-				: __("empty");
-			dialog.fields_dict.truck_now.$wrapper.html(
-				`<div class="small text-muted">${__("On truck now")}</div><div>${now}</div>` +
-				(message && message.capacity ? `<div class="small text-muted">${__("Capacity {0}", [format_number(message.capacity)])}</div>` : "")
-			);
 			if (!loading && items.length) {
 				dialog.fields_dict.items.df.data = items.map((i) => ({ item_code: i.item_code, qty: i.qty, uom: i.stock_uom }));
 				dialog.fields_dict.items.grid.refresh();

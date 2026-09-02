@@ -175,14 +175,38 @@ def get_truck_stock_summary(vehicle):
 def vehicle_query(doctype, txt, searchfield, start, page_len, filters):
 	"""Link-field query for Delivery Trip.vehicle.
 
-	Shows "free 120 · on truck: OPC-43 200" under each plate so the dispatcher
-	sees the stock without opening the Vehicle. Only Available / Assigned trucks
-	are offered; a truck Under Maintenance or On Trip is not.
+	Shows "free 120 of 300 · on truck: OPC-43 200" under each plate so the
+	dispatcher sees the stock without opening the Vehicle. Only Available /
+	Assigned trucks are offered; one Under Maintenance or On Trip is not.
+
+	Item conflict
+	    A truck already carrying a DIFFERENT cement is not offered at all.
+	    Mixing grades in one tank contaminates both, so a truck holding OPC-43
+	    is simply not a candidate for a PSC trip — it is hidden rather than
+	    offered and then rejected at submit. An EMPTY truck is always offered;
+	    so is one already carrying the same item, since that load can be
+	    reused instead of transferred twice.
+
+	    Pass `items` (the trip's item codes) to switch this on. Without it
+	    every truck is listed, which is what the Vehicle form itself wants.
+
+	Free units
+	    Computed here from Bin and the open trips, never read from the stored
+	    `custom_available_qty` cache — a hook that did not fire would
+	    otherwise offer a truck that is actually full. Pass `trip` so the trip
+	    being planned is not counted against its own truck.
 	"""
 	filters = filters or {}
 	statuses = filters.get("custom_status") or ["Available", "Assigned"]
 	if isinstance(statuses, (list, tuple)) and len(statuses) == 2 and statuses[0] == "in":
 		statuses = statuses[1]
+
+	wanted_items = filters.get("items") or []
+	if isinstance(wanted_items, str):
+		wanted_items = [code for code in json.loads(wanted_items or "[]") if code]
+	wanted_items = set(wanted_items)
+
+	exclude_trip = filters.get("trip")
 
 	conditions = {"custom_status": ("in", statuses)}
 	if txt:
@@ -194,8 +218,10 @@ def vehicle_query(doctype, txt, searchfield, start, page_len, filters):
 		fields=["name", "custom_capacity", "custom_status",
 		        "custom_vehicle_warehouse", "custom_assigned_driver"],
 		order_by="name",
-		start=start,
-		page_length=page_len,
+		# No page limit here on purpose. Trucks are dropped AFTER this query
+		# (item conflict), so paginating first would return short pages and
+		# silently hide candidates. `get_all` otherwise caps at 20.
+		limit_page_length=0,
 	)
 
 	warehouses = [v.custom_vehicle_warehouse for v in vehicles if v.custom_vehicle_warehouse]
@@ -213,7 +239,7 @@ def vehicle_query(doctype, txt, searchfield, start, page_len, filters):
 	# truck that is actually full.
 	from thameen_erp.overrides.vehicle_load import _committed_by_vehicle
 
-	committed = _committed_by_vehicle([v.name for v in vehicles])
+	committed = _committed_by_vehicle([v.name for v in vehicles], exclude_trip=exclude_trip)
 	on_hand = {}
 	for wh, lines in stock.items():
 		on_hand[wh] = sum(flt(qty) for _code, qty in lines)
@@ -221,20 +247,27 @@ def vehicle_query(doctype, txt, searchfield, start, page_len, filters):
 	out = []
 	for v in vehicles:
 		items = stock.get(v.custom_vehicle_warehouse) or []
+
+		# A truck holding a cement this trip does not carry is not a candidate.
+		if wanted_items and any(code not in wanted_items for code, _qty in items):
+			continue
+
 		capacity = flt(v.custom_capacity)
 		used = max(flt(committed.get(v.name)), flt(on_hand.get(v.custom_vehicle_warehouse)))
 		free = max(capacity - used, 0.0) if capacity else 0.0
 		parts = [
-			_("{0}").format(v.custom_status or ""),
-			_("free {0} of {1}").format(flt(free, 2), flt(capacity, 2)),
-			_("on truck: {0}").format(
-				", ".join(f"{code} {qty:g}" for code, qty in items)
-			) if items else _("on truck: empty"),
+			v.custom_status or "",
+			_("free {0} of {1}").format(flt(free, 2), flt(capacity, 2))
+			if capacity
+			else _("no capacity set"),
+			_("on truck: {0}").format(", ".join(f"{code} {qty:g}" for code, qty in items))
+			if items
+			else _("empty"),
 		]
 		out.append((v.name, " · ".join(p for p in parts if p)))
 
 	out.sort(key=lambda row: row[0])
-	return out
+	return out[start : start + page_len]
 
 
 # ---------------------------------------------------------------------------
@@ -509,8 +542,9 @@ def _require_vehicle_warehouse(vehicle):
 	warehouse = get_vehicle_warehouse(vehicle)
 	if not warehouse:
 		frappe.throw(
-			_("Vehicle {0} has no vehicle warehouse. Re-save the Vehicle with "
-			  "'Auto-create Cost Center & Warehouse' ticked.").format(frappe.bold(vehicle))
+			_("Vehicle {0} has no vehicle warehouse. Re-save the Vehicle to create it.").format(
+				frappe.bold(vehicle)
+			)
 		)
 	return warehouse
 

@@ -1101,6 +1101,14 @@ def _apply_property_setters():
 		("Delivery Trip", "driver", "in_standard_filter", "1", "Check"),
 		("Delivery Trip", "driver_name", "in_list_view", "0", "Check"),
 		("Delivery Trip", "status", "in_standard_filter", "1", "Check"),
+		# Dispatch filters the trip list by order as often as by truck.
+		("Delivery Trip", "custom_sales_order", "in_standard_filter", "1", "Check"),
+		# Planned Qty opens at 0, not 1. The DocType already ships default 0,
+		# but a site that touched this field through Customize Form carries a
+		# Property Setter that wins over it — so it is reasserted here on every
+		# migrate rather than left to whatever the site last saved.
+		("Delivery Trip Item", "qty", "default", "0", "Data"),
+		("Customer Requirement Item", "qty", "default", "0", "Data"),
 		# The list now carries the actual clock times instead of the planned
 		# departure — dispatch asks "when did it go out and come back", not
 		# "when was it meant to".

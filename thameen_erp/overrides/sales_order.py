@@ -190,7 +190,9 @@ def preview_trip_plan(sales_order):
 			}
 			for location, rows in groups.items()
 		],
-		"vehicles": list_vehicles_for_planning(),
+		"vehicles": list_vehicles_for_planning(
+			items=[row["item_code"] for row in plan if row.get("item_code")]
+		),
 		"departure_time": str(_default_departure(so)),
 	}
 
