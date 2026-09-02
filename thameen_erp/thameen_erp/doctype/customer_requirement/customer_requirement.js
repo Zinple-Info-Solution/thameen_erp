@@ -8,6 +8,8 @@ frappe.ui.form.on("Customer Requirement", {
 	},
 
 	refresh(frm) {
+		render_credit_banner(frm);
+
 		if (frm.doc.docstatus === 1 && frm.doc.status === "Approved" && !frm.doc.sales_order) {
 			frm.add_custom_button(__("Sales Order"), () => {
 				frappe.model.open_mapped_doc({
@@ -72,5 +74,32 @@ frappe.ui.form.on("Customer Requirement Item", {
 function set_amount(frm, cdt, cdn) {
 	const row = locals[cdt][cdn];
 	frappe.model.set_value(cdt, cdn, "amount", flt(row.qty) * flt(row.rate));
+}
+
+function render_credit_banner(frm) {
+	if (!frm.doc.customer || frm.is_new()) return;
+	const over = frm.doc.credit_limit && !frm.doc.credit_check_passed;
+	frm.dashboard.add_comment(
+		__("Credit limit {0} · Outstanding {1} · Available {2}", [
+			format_currency(frm.doc.credit_limit),
+			format_currency(frm.doc.outstanding_amount),
+			format_currency(frm.doc.available_credit),
+		]),
+		over ? "red" : "blue",
+		true
+	);
+}
+function render_credit_banner(frm) {
+	if (!frm.doc.customer || frm.is_new()) return;
+	const over = frm.doc.credit_limit && !frm.doc.credit_check_passed;
+	frm.dashboard.add_comment(
+		__("Credit limit {0} · Outstanding {1} · Available {2}", [
+			format_currency(frm.doc.credit_limit),
+			format_currency(frm.doc.outstanding_amount),
+			format_currency(frm.doc.available_credit),
+		]),
+		over ? "red" : "blue",
+		true
+	);
 }
 

@@ -154,6 +154,71 @@ function show_truck_stock(frm) {
 	});
 }
 
+// A plain reading of what is in the vehicle warehouse right now, with the
+// three numbers that are easy to confuse set side by side.
+function show_truck_stock(frm) {
+	frappe.call({
+		method: "thameen_erp.overrides.vehicle_stock.get_truck_stock_summary",
+		args: { vehicle: frm.doc.name },
+		freeze: true,
+		callback({ message }) {
+			if (!message) return;
+
+			const rows = (message.items || [])
+				.map(
+					(i) => `<tr>
+						<td>${frappe.utils.escape_html(i.item_code)}</td>
+						<td>${frappe.utils.escape_html(i.item_name || "")}</td>
+						<td class="text-right">${format_number(i.qty)}</td>
+						<td class="text-right">${format_number(i.on_loaded_trips)}</td>
+						<td class="text-right"><b>${format_number(i.free)}</b></td>
+						<td>${frappe.utils.escape_html(i.stock_uom || "")}</td>
+					</tr>`
+				)
+				.join("");
+
+			const table = rows
+				? `<table class="table table-bordered small">
+						<thead><tr>
+							<th>${__("Item")}</th><th>${__("Name")}</th>
+							<th class="text-right">${__("On truck")}</th>
+							<th class="text-right">${__("On loaded trips")}</th>
+							<th class="text-right">${__("Free")}</th>
+							<th>${__("UOM")}</th>
+						</tr></thead>
+						<tbody>${rows}</tbody>
+					</table>`
+				: `<p class="text-muted">${__("The truck is empty.")}</p>`;
+
+			const summary = `<table class="table table-bordered small">
+				<tbody>
+					<tr><td>${__("Rated capacity")}</td><td class="text-right">${format_number(message.capacity)} ${frappe.utils.escape_html(message.capacity_uom || "")}</td></tr>
+					<tr><td>${__("Committed to open trips")}</td><td class="text-right">${format_number(message.committed_qty)}</td></tr>
+					<tr><td>${__("Physically on truck")}</td><td class="text-right">${format_number(message.on_truck_qty)}</td></tr>
+					<tr><td><b>${__("Physical space left")}</b></td><td class="text-right"><b>${message.physical_space === null ? "—" : format_number(message.physical_space)}</b></td></tr>
+				</tbody>
+			</table>`;
+
+			const d = new frappe.ui.Dialog({
+				title: __("Stock on {0}", [frm.doc.name]),
+				size: "large",
+				fields: [{ fieldtype: "HTML", options: summary + table }],
+				primary_action_label: __("Open Stock Balance"),
+				primary_action() {
+					d.hide();
+					frappe.set_route("query-report", "Stock Balance", {
+						company: frm.doc.custom_company || frappe.defaults.get_user_default("Company"),
+						from_date: frappe.datetime.add_months(frappe.datetime.get_today(), -12),
+						to_date: frappe.datetime.get_today(),
+						warehouse: frm.doc.custom_vehicle_warehouse,
+					});
+				},
+			});
+			d.show();
+		},
+	});
+}
+
 function open_load_dialog(frm, direction) {
 	const loading = direction === "load";
 

@@ -456,7 +456,17 @@ function offer_split(frm, load) {
 		   </table></details>`
 		: "";
 
-	const summary = why;
+
+	// One line of numbers, no prose. The plan table below says the rest.
+	const summary = `
+		<div class="mb-2">
+			<b>${frappe.utils.escape_html(frm.doc.vehicle)}</b>
+			· ${__("capacity")} ${format_number(load.capacity)}
+			· ${__("free")} <b>${format_number(load.available_qty)}</b>
+			· ${__("this trip")} ${format_number(load.planned_qty)}
+			· <span class="text-danger">${__("over by")} ${format_number(load.overflow_qty)}</span>
+		</div>
+		${why}`;
 
 	const dialog = new frappe.ui.Dialog({
 		title: __("Not Enough Room"),
@@ -799,7 +809,7 @@ function render_plan(frm, dialog) {
 				<th>${__("Items & qty")}</th>
 				<th class="text-right" style="width:9%">${__("Total")}</th>
 				<th style="width:24%">${__("Vehicle")}</th>
-				<th style="width:16%">${__("Available stock")}</th>
+				<th style="width:16%">${__("Truck space")}</th>
 				<th style="width:13%">${__("Departure")}</th>
 			</tr></thead>
 			<tbody>${rows}</tbody>

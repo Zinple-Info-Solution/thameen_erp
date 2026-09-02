@@ -214,7 +214,7 @@ thameen.trip_planner._draw = function (dialog) {
 		<table class="table table-bordered small">
 			<thead><tr>
 				<th style="width:5%">#</th><th style="width:20%">${__("Line")}</th><th style="width:14%">${__("Qty")}</th>
-				<th>${__("Vehicle")}</th><th style="width:16%">${__("Available stock")}</th>
+				<th>${__("Vehicle")}</th><th style="width:16%">${__("Truck space")}</th>
 				<th style="width:14%">${__("Departure")}</th><th style="width:7%"></th>
 			</tr></thead>
 			<tbody>${rows}</tbody>
