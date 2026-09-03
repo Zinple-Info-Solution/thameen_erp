@@ -56,7 +56,22 @@ def ensure_vehicle_masters(doc):
 	values = {}
 	cost_center = doc.get("custom_cost_center") or create_vehicle_cost_center(doc, company)
 	warehouse = doc.get("custom_vehicle_warehouse") or create_vehicle_warehouse(doc, company)
-	asset_item = doc.get("custom_asset_item") or create_vehicle_asset_item(doc, company)
+
+	# The asset item is a convenience, not a requirement — a truck works
+	# without one. It is the only master here that can fail for reasons
+	# outside this app (ERPNext refuses a fixed-asset Item on a site with no
+	# Asset Category), so a failure is logged and stepped over rather than
+	# taking the Vehicle save down with it.
+	asset_item = doc.get("custom_asset_item")
+	if not asset_item:
+		try:
+			asset_item = create_vehicle_asset_item(doc, company)
+		except Exception:
+			frappe.log_error(
+				frappe.get_traceback(),
+				f"Thameen ERP: could not create asset item for Vehicle {doc.name}",
+			)
+			asset_item = None
 
 	if cost_center and cost_center != doc.get("custom_cost_center"):
 		values["custom_cost_center"] = cost_center
@@ -95,6 +110,16 @@ def create_vehicle_asset_item(doc, company):
 	if not group:
 		return None
 
+	# ERPNext makes Asset Category mandatory on any Item flagged
+	# `is_fixed_asset`. On a site with no Asset Category set up, creating this
+	# item throws "Asset Category is mandatory for Fixed Asset item" — and
+	# because it ran inside the Vehicle's own save, the truck could not be
+	# saved at all. The asset item is optional, so skip it instead: create an
+	# Asset Category and re-save the Vehicle to get one.
+	category = _get_asset_category()
+	if not category:
+		return None
+
 	item = frappe.get_doc(
 		{
 			"doctype": "Item",
@@ -108,7 +133,7 @@ def create_vehicle_asset_item(doc, company):
 			"is_stock_item": 0,
 			"is_purchase_item": 1,
 			"is_sales_item": 0,
-			"asset_category": _get_asset_category(),
+			"asset_category": category,
 		}
 	)
 	item.flags.ignore_permissions = True
@@ -124,7 +149,12 @@ def _get_asset_item_group():
 
 
 def _get_asset_category():
-	"""Optional. Asset Category is only required when the Asset is raised."""
+	"""The site's vehicle Asset Category, or None if it has none.
+
+	Not optional, despite what this used to say: ERPNext requires it on any
+	Item flagged `is_fixed_asset`. When there is none, the asset item is
+	skipped entirely rather than attempted and failed.
+	"""
 	for name in ("Motor Vehicle", "Vehicles", "Motor Vehicles"):
 		if frappe.db.exists("Asset Category", name):
 			return name

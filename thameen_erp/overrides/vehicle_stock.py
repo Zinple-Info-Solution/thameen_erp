@@ -255,15 +255,24 @@ def vehicle_query(doctype, txt, searchfield, start, page_len, filters):
 		capacity = flt(v.custom_capacity)
 		used = max(flt(committed.get(v.name)), flt(on_hand.get(v.custom_vehicle_warehouse)))
 		free = max(capacity - used, 0.0) if capacity else 0.0
-		parts = [
-			v.custom_status or "",
-			_("free {0} of {1}").format(flt(free, 2), flt(capacity, 2))
-			if capacity
-			else _("no capacity set"),
-			_("on truck: {0}").format(", ".join(f"{code} {qty:g}" for code, qty in items))
-			if items
-			else _("empty"),
-		]
+
+		# A truck already loaded with what the trip is delivering reads as
+		# "free 0" — technically true and completely misleading, because that
+		# load is the trip. Say what it is carrying first, and describe it as
+		# ready rather than full.
+		carrying = ", ".join(f"{code} {qty:g}" for code, qty in items)
+		if not capacity:
+			state = _("no capacity set")
+		elif items and wanted_items and free <= 0.001:
+			state = _("loaded: {0}").format(carrying)
+		elif items:
+			state = _("free {0} of {1} · on truck: {2}").format(
+				flt(free, 2), flt(capacity, 2), carrying
+			)
+		else:
+			state = _("free {0} of {1} · empty").format(flt(free, 2), flt(capacity, 2))
+
+		parts = [v.custom_status or "", state]
 		out.append((v.name, " · ".join(p for p in parts if p)))
 
 	out.sort(key=lambda row: row[0])
@@ -582,3 +591,147 @@ def _parse_items(items):
 				or 1.0
 			)
 	return items
+
+
+# ---------------------------------------------------------------------------
+# A vehicle warehouse cannot hold more than the truck is rated for
+#
+# The vehicle warehouse IS the truck — it is not a shed that happens to be
+# named after one. So its ceiling is the truck's Capacity, and any document
+# that would push it over that line is refused.
+#
+# The manual Load dialog already checked this on its own way in. It was the
+# only door with a lock: a Stock Entry typed straight into ERPNext, a Purchase
+# Receipt delivered to a vehicle warehouse, or a Stock Reconciliation could all
+# put 500 bags on a truck rated 20 and nothing objected.
+# ---------------------------------------------------------------------------
+
+
+def _vehicles_by_warehouse(warehouses):
+	"""{warehouse: (vehicle, capacity)} for those that belong to a truck."""
+	warehouses = [w for w in set(warehouses or []) if w]
+	if not warehouses:
+		return {}
+
+	rows = frappe.get_all(
+		"Vehicle",
+		filters={"custom_vehicle_warehouse": ("in", warehouses)},
+		fields=["name", "custom_vehicle_warehouse", "custom_capacity"],
+		limit_page_length=0,
+	)
+	return {
+		row.custom_vehicle_warehouse: (row.name, flt(row.custom_capacity))
+		for row in rows
+		if flt(row.custom_capacity) > 0
+	}
+
+
+def _warehouse_qty(warehouse, item_code=None):
+	"""Actual qty in a warehouse — the whole warehouse, or one item in it."""
+	if item_code:
+		return flt(
+			frappe.db.get_value(
+				"Bin", {"warehouse": warehouse, "item_code": item_code}, "actual_qty"
+			)
+		)
+	row = frappe.db.sql(
+		"select sum(actual_qty) from `tabBin` where warehouse = %s", (warehouse,)
+	)
+	return flt(row[0][0]) if row and row[0] else 0.0
+
+
+def _capacity_deltas(doc):
+	"""Net change this document makes to each vehicle warehouse.
+
+	Stock Entry rows move qty from s_warehouse to t_warehouse, so a transfer
+	that takes 5 off a truck and puts 5 back nets to zero.
+
+	Stock Reconciliation is different: its `qty` is the ABSOLUTE qty the item
+	should end up at, not an amount to add. Treating it as an addition would
+	reject a reconciliation that actually lowers the stock, so the delta is
+	measured against what is on the truck now.
+	"""
+	rows = doc.get("items") or []
+	deltas = {}
+
+	if doc.doctype == "Stock Entry":
+		for row in rows:
+			qty = flt(row.get("transfer_qty") or row.get("qty"))
+			if not qty:
+				continue
+			if row.get("t_warehouse"):
+				deltas[row.t_warehouse] = flt(deltas.get(row.t_warehouse)) + qty
+			if row.get("s_warehouse"):
+				deltas[row.s_warehouse] = flt(deltas.get(row.s_warehouse)) - qty
+		return deltas
+
+	if doc.doctype == "Stock Reconciliation":
+		for row in rows:
+			warehouse = row.get("warehouse")
+			if not warehouse or row.get("qty") is None:
+				continue
+			change = flt(row.qty) - _warehouse_qty(warehouse, row.get("item_code"))
+			deltas[warehouse] = flt(deltas.get(warehouse)) + change
+		return deltas
+
+	# Purchase Receipt and anything else shaped like it: qty arrives.
+	for row in rows:
+		warehouse = row.get("warehouse")
+		qty = flt(row.get("stock_qty") or row.get("qty"))
+		if warehouse and qty:
+			deltas[warehouse] = flt(deltas.get(warehouse)) + qty
+	return deltas
+
+
+def validate_vehicle_warehouse_capacity(doc, method=None):
+	"""Refuse any movement that would overfill a truck.
+
+	The vehicle warehouse IS the truck, so its ceiling is the truck's Capacity.
+	The manual Load dialog checked this on its own way in, but it was the only
+	door with a lock — a Stock Entry typed straight into ERPNext, a Purchase
+	Receipt delivered to a vehicle warehouse, or a Stock Reconciliation could
+	each put 500 bags on a truck rated 20 and nothing objected.
+
+	Cancellations and returns are never blocked: taking stock off a truck
+	cannot overfill it, and refusing would strand the document.
+	"""
+	if doc.docstatus == 2 or cint(doc.get("is_return")):
+		return
+	if not doc.get("items"):
+		return
+
+	deltas = _capacity_deltas(doc)
+	incoming = {wh: qty for wh, qty in deltas.items() if qty > 0.001}
+	if not incoming:
+		return
+
+	vehicles = _vehicles_by_warehouse(incoming.keys())
+	if not vehicles:
+		return
+
+	for warehouse, moving in incoming.items():
+		if warehouse not in vehicles:
+			continue
+
+		vehicle, capacity = vehicles[warehouse]
+		current = _warehouse_qty(warehouse)
+		after = current + moving
+		if after <= capacity + 0.001:
+			continue
+
+		room = max(capacity - current, 0.0)
+		frappe.throw(
+			_(
+				"{0} is rated to carry {1}, and {2} is already on it. This document adds {3} more, "
+				"taking it to {4} — more than the truck can hold."
+				"<br><br>Change the quantity to {5} or less."
+			).format(
+				frappe.bold(vehicle),
+				flt(capacity, 2),
+				flt(current, 2),
+				flt(moving, 2),
+				flt(after, 2),
+				frappe.bold(flt(room, 2)),
+			),
+			title=_("Over Vehicle Capacity"),
+		)

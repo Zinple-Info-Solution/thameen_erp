@@ -48,7 +48,7 @@ frappe.ui.form.on("Delivery Trip", {
 			query: "thameen_erp.overrides.vehicle_stock.vehicle_query",
 			filters: {
 				custom_status: ["in", ["Available", "Assigned"]],
-				items: distinct_items(frm),
+				
 				trip: frm.is_new() ? null : frm.doc.name,
 			},
 		}));
@@ -432,7 +432,13 @@ function check_vehicle_load(frm, opts) {
 				return;
 			}
 
-			if (message.fits || !opts.prompt || frm.doc.docstatus !== 0) return;
+			if (!opts.prompt || frm.doc.docstatus !== 0) return;
+
+			// `force` is set when the yard is short but the truck is carrying
+			// enough for a journey. The load may well "fit" on paper — the
+			// problem is the cement, not the space — and the dispatcher still
+			// needs the split plan to decide what goes out today.
+			if (message.fits && !opts.force) return;
 
 			// Zero free space is not "a bit too much" — splitting cannot fix
 			// it, because every load would still need somewhere to go. Say so
@@ -442,7 +448,7 @@ function check_vehicle_load(frm, opts) {
 				return;
 			}
 
-			offer_split(frm, message);
+			offer_split(frm, message, opts.check);
 		},
 	});
 }
@@ -452,15 +458,18 @@ function show_no_room(frm, load) {
 		.map((i) => `${frappe.utils.escape_html(i.item_code)} ${format_number(i.qty)}`)
 		.join(", ");
 
-	const html = `<p>${__("{0} has no free space, so nothing can be planned onto it.", [
+	const html = `<p>${__("{0} cannot take this trip.", [
 		`<b>${frappe.utils.escape_html(frm.doc.vehicle)}</b>`,
 	])}</p>
 	<table class="table table-bordered small">
 		<tbody>
 			<tr><td>${__("Rated capacity")}</td><td class="text-right">${format_number(load.capacity)}</td></tr>
 			<tr><td>${__("Physically on truck")}</td><td class="text-right">${format_number(load.on_truck_qty)}</td></tr>
+			<tr><td>${__("Of that, usable by this trip")}</td><td class="text-right">${format_number(load.from_truck_qty)}</td></tr>
 			<tr><td>${__("Promised to other trips")}</td><td class="text-right">${format_number(load.committed_qty)}</td></tr>
-			<tr><td><b>${__("Free")}</b></td><td class="text-right"><b>0</b></td></tr>
+			<tr><td>${__("This trip plans")}</td><td class="text-right">${format_number(load.planned_qty)}</td></tr>
+			<tr><td><b>${__("Still needs loading")}</b></td><td class="text-right"><b>${format_number(load.to_load_qty)}</b></td></tr>
+			<tr><td><b>${__("Room for it")}</b></td><td class="text-right"><b>${format_number(load.free_space)}</b></td></tr>
 		</tbody>
 	</table>
 	${holding ? `<p class="small text-muted">${__("Currently carrying")}: ${holding}</p>` : ""}
@@ -483,20 +492,23 @@ function show_no_room(frm, load) {
 // ---------------------------------------------------------------------------
 // One truck chosen, one dialog at most
 //
-// Two different questions get asked when a vehicle is picked, and they have a
-// strict order:
+// Two different questions get asked when a vehicle is picked:
 //
-//   1. Is the cement THERE?   — yard + truck, via check_trip_stock
-//   2. Does it FIT?           — capacity, via check_vehicle_load
+//   1. Is there anything to deliver?  — via check_trip_stock
+//   2. Does it fit in one journey?    — capacity, via check_vehicle_load
 //
-// Stock wins. Splitting a trip you cannot fill is busywork: the split just
-// turns one unfillable trip into three, and the dispatcher still has to go and
-// buy the cement. So when stock is short the Insufficient Stock dialog opens
-// on its own and the split is not offered at all. Only once the cement exists
-// does "it will not fit on one truck" become the real problem.
+// What decides between them is whether the TRUCK has usable stock for this
+// trip, not whether the yard can cover the whole thing.
 //
-// They also used to fire as two parallel calls, so whichever server response
-// landed second threw its dialog on top of the first. Now they are sequenced.
+//   truck has some          the driver can take a load out today, so the
+//                           useful answer is "split this into journeys" —
+//                           even if the yard cannot cover the full order.
+//   truck has none          nothing can go anywhere. Splitting nothing into
+//                           three still delivers nothing, so the useful
+//                           answer is "get some cement".
+//
+// They also used to fire as two parallel calls, so whichever response landed
+// second threw its dialog on top of the first. Now they are sequenced.
 // ---------------------------------------------------------------------------
 
 function after_vehicle_chosen(frm) {
@@ -515,25 +527,38 @@ function after_vehicle_chosen(frm) {
 		callback({ message }) {
 			if (!message) return;
 
-			// Nothing to fill the trip with. This dialog, and only this one —
-			// a direct trip says so in its own words, because its stock is a
-			// Purchase Order rather than a yard.
 			if (!message.sufficient) {
+				// A direct trip's stock is a Purchase Order, not a yard.
 				if (message.supply_source === "Direct from Supplier") {
 					show_direct_supply_check(frm, message);
-				} else {
-					offer_procurement(frm, message);
+					return;
 				}
+
+				// Nothing on the truck for this trip — there is no journey to
+				// plan, so ask for cement rather than offering a split.
+				if (usable_on_truck(message) <= 0.001) {
+					offer_procurement(frm, message);
+					return;
+				}
+				// Otherwise fall through: the truck is carrying something, so
+				// the split plan is the useful thing to show — forced open,
+				// because a short trip may still "fit" on capacity alone.
+				check_vehicle_load(frm, { prompt: true, check: message, force: true });
 				return;
 			}
 
-			// Cement exists. Now: is there room on this truck for it?
-			check_vehicle_load(frm, { prompt: true });
+			check_vehicle_load(frm, { prompt: true, check: message });
 		},
 	});
 }
 
-function offer_split(frm, load) {
+// How much of this trip's cement is already on the truck and unclaimed by
+// another trip. Anything above zero means at least one journey can go out.
+function usable_on_truck(check) {
+	return (check.rows || []).reduce((sum, r) => sum + flt(r.on_truck_free), 0);
+}
+
+function offer_split(frm, load, check) {
 	const committed_rows = (load.committed_trips || [])
 		.map(
 			(trip) =>
@@ -551,12 +576,28 @@ function offer_split(frm, load) {
 		   </table></details>`
 		: "";
 
+	// Reached here with cement short: the truck has enough for a journey or
+	// two, so splitting is worth doing, but the later journeys have nothing
+	// behind them yet. Say so rather than letting the plan look complete.
+	const short_rows = (check && check.rows ? check.rows : []).filter((r) => flt(r.shortfall) > 0);
+	const shortfall_note = short_rows.length
+		? `<div class="alert alert-warning py-2 px-3 mb-2 small">
+			${__("The yard cannot cover the whole order yet:")}
+			${short_rows
+				.map(
+					(r) =>
+						`<b>${frappe.utils.escape_html(r.item_code)}</b> ${__("short")} ${format_number(r.shortfall)}`
+				)
+				.join(", ")}.
+			${__("Plan the journeys you can load now — the rest needs buying before it can go.")}
+		   </div>`
+		: "";
 
 	const dialog = new frappe.ui.Dialog({
 		title: __("Split Trip"),
 		size: "extra-large",
 		fields: [
-			{ fieldtype: "HTML", fieldname: "summary", options: why },
+			{ fieldtype: "HTML", fieldname: "summary", options: shortfall_note + why },
 			{
 				fieldname: "use_capacity",
 				fieldtype: "Check",
@@ -656,14 +697,19 @@ function vehicle_of(dialog, name) {
 	return (dialog.vehicles || []).find((v) => v.name === name);
 }
 
-// Free space on a truck, or null when it has no Capacity rated — an unrated
-// truck cannot be planned against, so its load is left exactly as it is.
+// How much a plan may put on a truck, or null when it has no Capacity rated —
+// an unrated truck cannot be planned against, so its load is left as it is.
+//
+// Free space PLUS the trip's own cement already aboard: that part needs no
+// room, it is already on the truck. Counting it as occupied space and as a
+// load needing space is the same bags twice.
 function vehicle_free(dialog, name) {
 	const v = vehicle_of(dialog, name);
 	if (!v || !flt(v.capacity)) return null;
 	// "Plan against full capacity" means the other trips on that truck will be
 	// done by the time this one loads, so ignore what is committed.
 	if (dialog.plan_use_capacity) return flt(v.capacity);
+	if (v.planable !== undefined) return flt(v.planable);
 	return flt(v.free !== undefined ? v.free : v.available);
 }
 
@@ -837,7 +883,7 @@ function render_plan(frm, dialog) {
 							(i, k) =>
 								`<div class="d-flex align-items-center mb-1">
 									<span style="min-width:90px">${frappe.utils.escape_html(i.item_code)}</span>
-									<input type="number" step="any" min="0" class="form-control input-xs plan-qty" style="width:110px"
+									<input type="text" inputmode="decimal" class="form-control input-xs plan-qty no-spin" style="width:110px"
 										data-index="${index}" data-item="${k}" value="${i.qty}">
 									<span class="text-muted small ml-1">${frappe.utils.escape_html(i.uom || "")}</span>
 								</div>`
@@ -1172,23 +1218,23 @@ function add_load_buttons(frm) {
 
 	frm.add_custom_button(__("Check Load"), () => check_vehicle_load(frm, { prompt: true }));
 
-	frm.add_custom_button(__("Split Into Trips"), () => {
-		frappe.call({
-			method: "thameen_erp.overrides.vehicle_load.get_vehicle_load",
-			args: { vehicle: frm.doc.vehicle, trip: frm.doc.name },
-			callback({ message }) {
-				if (!message || !message.has_capacity) {
-					frappe.msgprint(
-						__("Set a Capacity on {0} before splitting.", [frm.doc.vehicle])
-					);
-					return;
-				}
-				// Deliberately offered even when it fits: a dispatcher may want
-				// two half-loaded trucks going out together rather than one.
-				offer_split(frm, message);
-			},
-		});
-	});
+	// frm.add_custom_button(__("Split Into Trips"), () => {
+	// 	frappe.call({
+	// 		method: "thameen_erp.overrides.vehicle_load.get_vehicle_load",
+	// 		args: { vehicle: frm.doc.vehicle, trip: frm.doc.name },
+	// 		callback({ message }) {
+	// 			if (!message || !message.has_capacity) {
+	// 				frappe.msgprint(
+	// 					__("Set a Capacity on {0} before splitting.", [frm.doc.vehicle])
+	// 				);
+	// 				return;
+	// 			}
+	// 			// Deliberately offered even when it fits: a dispatcher may want
+	// 			// two half-loaded trucks going out together rather than one.
+	// 			offer_split(frm, message);
+	// 		},
+	// 	});
+	// });
 }
 
 

@@ -90,6 +90,16 @@ doc_events = {
 	# when purchasing cancels something underneath them.
 	"Purchase Receipt": {
 		"on_cancel": "thameen_erp.overrides.procurement.purchase_receipt_on_cancel",
+		"validate": "thameen_erp.overrides.vehicle_stock.validate_vehicle_warehouse_capacity",
+	},
+	# A vehicle warehouse is the truck, so it cannot hold more than the truck
+	# is rated for. The manual Load dialog checked this already; these are the
+	# other doors into the same warehouse.
+	"Stock Entry": {
+		"validate": "thameen_erp.overrides.vehicle_stock.validate_vehicle_warehouse_capacity",
+	},
+	"Stock Reconciliation": {
+		"validate": "thameen_erp.overrides.vehicle_stock.validate_vehicle_warehouse_capacity",
 	},
 	# Keep Vehicle.On Truck Qty equal to the vehicle warehouse at all times.
 	"Stock Ledger Entry": {

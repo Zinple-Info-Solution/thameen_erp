@@ -174,21 +174,43 @@ def get_vehicle_load(vehicle, trip=None):
 	# the truck warehouse. A truck rated 20 carrying 10 has 10 free even if no
 	# trip claims that 10. `max` rather than the sum, because a trip that has
 	# already loaded is counted in both.
-	from thameen_erp.overrides.vehicle_stock import get_truck_stock
+	from thameen_erp.overrides.vehicle_stock import free_truck_stock, get_truck_stock
 
 	on_truck_now = sum(get_truck_stock(vehicle).values())
 	available = max(capacity - max(committed, on_truck_now), 0.0) if capacity else 0.0
 
 	planned = 0.0
+	planned_by_item = {}
 	if trip and frappe.db.exists("Delivery Trip", trip):
 		rows = frappe.get_all(
 			"Delivery Trip Item",
 			filters={"parent": trip, "parenttype": "Delivery Trip"},
-			fields=["qty", "conversion_factor"],
+			fields=["item_code", "qty", "conversion_factor"],
 		)
 		planned = sum(stock_qty(row) for row in rows)
+		for row in rows:
+			planned_by_item[row.item_code] = flt(planned_by_item.get(row.item_code)) + stock_qty(row)
 
-	overflow = max(planned - available, 0.0) if capacity else 0.0
+	# Cement this trip will take FROM the truck rather than load onto it.
+	#
+	# Without this the same bags were counted twice: once as stock filling the
+	# truck, and again as a load needing room. A truck rated 20, already
+	# carrying the 20 this trip is delivering, came out as "0 free, needs 20"
+	# and was refused — when in fact it is loaded and ready to go.
+	#
+	# What matters is what still has to be PUT ON: planned less what is
+	# already aboard and unclaimed by another trip.
+	from_truck = 0.0
+	if planned_by_item:
+		usable = free_truck_stock(vehicle, set(planned_by_item), exclude_trip=trip)
+		from_truck = sum(
+			min(flt(qty), flt(usable.get(item))) for item, qty in planned_by_item.items()
+		)
+
+	# Room for what must still be loaded, plus the trip's own cement already
+	# aboard — that part needs no room, it is on the truck.
+	effective_available = available + from_truck if capacity else 0.0
+	overflow = max(planned - effective_available, 0.0) if capacity else 0.0
 
 	# Physical stock on the truck — read from Bin, never stored. Shown next to
 	# the capacity figures so the dispatcher sees what is ON the truck as well
@@ -201,7 +223,10 @@ def get_vehicle_load(vehicle, trip=None):
 		"vehicle": vehicle,
 		"capacity": capacity,
 		"committed_qty": committed,
-		"available_qty": available,
+		"available_qty": effective_available,
+		"free_space": available,
+		"from_truck_qty": from_truck,
+		"to_load_qty": max(planned - from_truck, 0.0),
 		"planned_qty": planned,
 		"overflow_qty": overflow if overflow > QTY_TOLERANCE else 0.0,
 		"fits": overflow <= QTY_TOLERANCE,
@@ -330,6 +355,8 @@ def list_vehicles_for_planning(exclude_trip=None, on_date=None, items=None):
 	on_truck = _stock_by_warehouse([v.warehouse for v in vehicles if v.warehouse])
 	by_item = _stock_items_by_warehouse([v.warehouse for v in vehicles if v.warehouse])
 
+	from thameen_erp.overrides.vehicle_stock import free_truck_stock
+
 	out = []
 	for v in vehicles:
 		lines = by_item.get(v.warehouse) or {}
@@ -343,11 +370,25 @@ def list_vehicles_for_planning(exclude_trip=None, on_date=None, items=None):
 		v.on_truck_items = [{"item_code": code, "qty": flt(qty)} for code, qty in sorted(lines.items())]
 		v.is_empty = not v.on_truck_items
 		v.free = max(flt(v.capacity) - max(v.committed, v.on_truck), 0.0) if v.capacity else 0.0
+
+		# Cement of the wanted items already aboard and unclaimed by another
+		# trip. It needs no room — it is on the truck. Counting it as
+		# occupied space AND as a load needing space is the same bags twice,
+		# and made a fully loaded truck look like it had nowhere to put its
+		# own load.
+		v.usable_on_truck = (
+			sum(flt(qty) for qty in free_truck_stock(v.name, wanted, exclude_trip=exclude_trip).values())
+			if wanted
+			else 0.0
+		)
+		# What a plan may put on this truck: free space plus what is already
+		# aboard for this trip.
+		v.planable = flt(v.free) + flt(v.usable_on_truck)
 		# Kept for callers written against the old key name.
 		v.available = v.free
 		out.append(v)
 
-	out.sort(key=lambda v: (-flt(v.free), v.name))
+	out.sort(key=lambda v: (-flt(v.planable), v.name))
 	return out
 
 

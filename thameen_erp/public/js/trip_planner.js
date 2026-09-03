@@ -110,13 +110,30 @@ thameen.trip_planner.collect = function (dialog) {
 };
 
 thameen.trip_planner.auto_split = function (dialog, vehicle, start_date, days_between) {
-	// Rewrite the plan: every key split by this truck's capacity, one trip per day.
+	// Rewrite the plan: every key split by what this truck can actually take,
+	// one trip per day.
 	const o = dialog.planner;
 	const v = o.vehicles.find((x) => x.name === vehicle);
 	if (!v || flt(v.capacity) <= 0) {
 		frappe.msgprint(__("Set a Capacity on {0} before planning by it.", [vehicle]));
 		return;
 	}
+
+	// Free space, not rated capacity. A truck rated 20 carrying 15 can take 5,
+	// and planning 20 into it just moves the overflow to load time.
+	const per_trip = flt(v.free !== undefined ? v.free : v.available);
+	if (per_trip <= 0.001) {
+		frappe.msgprint({
+			title: __("No Room on Truck"),
+			indicator: "orange",
+			message: __(
+				"{0} has no free space — rated {1}, {2} already on it or promised to other trips. Unload it or pick another truck.",
+				[vehicle, format_number(v.capacity), format_number(Math.max(flt(v.on_truck), flt(v.committed)))]
+			),
+		});
+		return;
+	}
+
 	const totals = {};
 	o.plan.forEach((p) => (totals[p.key] = flt(totals[p.key]) + flt(p.qty)));
 	const template = {};
@@ -126,7 +143,7 @@ thameen.trip_planner.auto_split = function (dialog, vehicle, start_date, days_be
 	Object.keys(totals).forEach((key) => {
 		let left = totals[key];
 		while (left > 0.001) {
-			const take = Math.min(left, flt(v.capacity));
+			const take = Math.min(left, per_trip);
 			out.push({ ...template[key], qty: take, vehicle, departure_time: date });
 			left -= take;
 			date = frappe.datetime.add_days(date, days_between || 1);
@@ -181,7 +198,7 @@ thameen.trip_planner._draw = function (dialog) {
 			return `<tr class="${over ? "table-warning" : ""}">
 				<td>${i + 1}</td>
 				<td>${frappe.utils.escape_html(p.label || p.item_code)}</td>
-				<td><input type="number" step="any" min="0" class="form-control input-xs tp-qty" data-i="${i}" value="${p.qty}" style="width:110px">
+				<td><input type="text" inputmode="decimal" class="form-control input-xs tp-qty no-spin" data-i="${i}" value="${p.qty}" style="width:110px">
 					${over ? `<div class="text-danger small">${__("over by {0}", [format_number(flt(p.qty) - free)])}</div>` : ""}</td>
 				<td><select class="form-control input-xs tp-vehicle" data-i="${i}">${vehicle_opts(p.vehicle, i)}</select></td>
 				<td>${truck_state(p)}</td>
