@@ -1440,4 +1440,36 @@ def _stamp_trip_times(doc, status):
 	if start and end:
 		updates["custom_trip_duration_hours"] = flt(time_diff_in_hours(end, start), 2)
 
+	updates = _writable_columns("Delivery Trip", updates)
+	if not updates:
+		return
+
 	doc.db_set(updates, update_modified=False)
+
+
+def _writable_columns(doctype, updates):
+	"""Drop any key that has no column on `doctype`.
+
+	Stamping a time is bookkeeping — it must never be the reason a trip cannot
+	move from Scheduled to Loading. On a site where the custom fields did not
+	install cleanly these columns are absent, and writing them raises
+	OperationalError 1054 in the middle of the status change, after the stock
+	movement has already been made. Skipping the stamp keeps the trip usable;
+	`bench migrate` restores the columns and later trips stamp normally.
+	"""
+	safe = {}
+	for fieldname, value in updates.items():
+		try:
+			if frappe.db.has_column(doctype, fieldname):
+				safe[fieldname] = value
+				continue
+		except Exception:
+			return {}
+
+		frappe.log_error(
+			f"Column {doctype}.{fieldname} is missing, so the value was not stamped. "
+			f"Run `bench --site <site> migrate` to install the Thameen ERP custom fields.",
+			"Thameen ERP: missing custom field column",
+		)
+
+	return safe

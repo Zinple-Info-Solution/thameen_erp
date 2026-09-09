@@ -6,3 +6,4 @@ thameen_erp.patches.v1_0.backfill_vehicle_cost_centers
 thameen_erp.patches.v1_0.backfill_trip_items
 thameen_erp.patches.v1_0.backfill_transportation_item
 thameen_erp.patches.v1_0.backfill_trip_route
+thameen_erp.patches.v1_0.ensure_trip_time_fields

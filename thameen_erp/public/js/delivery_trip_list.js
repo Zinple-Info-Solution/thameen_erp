@@ -27,10 +27,10 @@ frappe.listview_settings["Delivery Trip"] = {
 		},
 		// A trip that has started but not finished shows how long it has been
 		// out, which is the number dispatch actually watches.
-		custom_trip_start(value) {
-			if (!value) return `<span class="text-muted">${__("not started")}</span>`;
-			return frappe.datetime.str_to_user(value);
-		},
+		// custom_trip_start(value) {
+		// 	if (!value) return `<span class="text-muted">${__("not started")}</span>`;
+		// 	return frappe.datetime.str_to_user(value);
+		// },
 		custom_trip_end(value, df, doc) {
 			if (value) return frappe.datetime.str_to_user(value);
 			if (!doc.custom_trip_start) return "";

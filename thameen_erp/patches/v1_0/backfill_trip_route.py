@@ -29,10 +29,21 @@ def execute():
 	if not frappe.db.exists("DocType", "Delivery Trip"):
 		return
 
-	meta = frappe.get_meta("Delivery Trip")
-	for field in ("custom_trip_route", "custom_trip_start", "custom_trip_end"):
-		if not meta.has_field(field):
-			# install.py has not run yet on this site; after_migrate will.
+	# Check the columns, not the meta. A site can carry the Custom Field rows
+	# (so `meta.has_field` is True) while the ALTER TABLE that should have
+	# added the columns never ran — reading or writing them then fails with
+	# OperationalError 1054. `ensure_trip_time_fields` repairs those sites and
+	# calls this backfill again afterwards.
+	for field in (
+		"custom_trip_route",
+		"custom_trip_start",
+		"custom_trip_end",
+		"custom_trip_duration_hours",
+	):
+		try:
+			if not frappe.db.has_column("Delivery Trip", field):
+				return
+		except Exception:
 			return
 
 	trips = frappe.get_all(

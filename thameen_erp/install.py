@@ -518,6 +518,45 @@ def get_custom_fields() -> dict:
 				"description": "Driven by Trip Route.",
 				"insert_after": "custom_external_transporter",
 			},
+			# Where the trip ends. Customer (the normal case) or one of our own
+			# warehouses (inbound from the supplier: no DN, no POD).
+			{
+				"fieldname": "custom_destination_type",
+				"label": "Destination",
+				"fieldtype": "Select",
+				"options": "Customer\nOwn Warehouse\nDecide After Loading",
+				"default": "Customer",
+				"read_only": 1,
+				"allow_on_submit": 1,
+				"description": "Driven by Trip Route. Changed in-flight by the Destination buttons.",
+				"insert_after": "custom_supply_source",
+			},
+			# Where this trip came from — filterable in the list view.
+			{
+				"fieldname": "custom_trip_source",
+				"label": "Source",
+				"fieldtype": "Select",
+				"options": "\nSales Order\nPurchase Order\nManual",
+				"read_only": 1,
+				"hidden": 1,
+				"no_copy": 1,
+				"insert_after": "custom_destination_type",
+			},
+			{
+				"fieldname": "custom_target_warehouse",
+				"label": "Target Warehouse",
+				"fieldtype": "Link",
+				"options": "Warehouse",
+				"allow_on_submit": 1,
+				"depends_on": "eval:doc.custom_destination_type=='Own Warehouse'",
+				"mandatory_depends_on": "eval:doc.custom_destination_type=='Own Warehouse'",
+				"description": "Yard warehouse the cement is unloaded into at Delivered.",
+				"insert_after": "custom_trip_source",
+			},
+			# NOTE: everything below refers to a field defined ABOVE it. Frappe's
+			# create_custom_fields() walks this list in order and aborts the whole
+			# run on the first field it cannot place — which leaves the pending
+			# ALTER TABLE unrun and the columns missing. Keep the chain in order.
 			{
 				"fieldname": "custom_supplier_warehouse",
 				"label": "Supplier Warehouse",
@@ -555,41 +594,6 @@ def get_custom_fields() -> dict:
 				"depends_on": "eval:doc.custom_supply_source=='Direct from Supplier' || doc.custom_purchase_order",
 				"description": "Supplier order this trip collects against. Must be submitted before the trip can be loaded.",
 				"insert_after": "custom_supplier",
-			},
-			# Where the trip ends. Customer (the normal case) or one of our own
-			# warehouses (inbound from the supplier: no DN, no POD).
-			{
-				"fieldname": "custom_destination_type",
-				"label": "Destination",
-				"fieldtype": "Select",
-				"options": "Customer\nOwn Warehouse\nDecide After Loading",
-				"default": "Customer",
-				"read_only": 1,
-				"allow_on_submit": 1,
-				"description": "Driven by Trip Route. Changed in-flight by the Destination buttons.",
-				"insert_after": "custom_supply_source",
-			},
-			# Where this trip came from — filterable in the list view.
-			{
-				"fieldname": "custom_trip_source",
-				"label": "Source",
-				"fieldtype": "Select",
-				"options": "\nSales Order\nPurchase Order\nManual",
-				"read_only": 1,
-				"hidden": 1,
-				"no_copy": 1,
-				"insert_after": "custom_destination_type",
-			},
-			{
-				"fieldname": "custom_target_warehouse",
-				"label": "Target Warehouse",
-				"fieldtype": "Link",
-				"options": "Warehouse",
-				"allow_on_submit": 1,
-				"depends_on": "eval:doc.custom_destination_type=='Own Warehouse'",
-				"mandatory_depends_on": "eval:doc.custom_destination_type=='Own Warehouse'",
-				"description": "Yard warehouse the cement is unloaded into at Delivered.",
-				"insert_after": "custom_trip_source",
 			},
 			{
 				"fieldname": "custom_purchase_receipt",
@@ -1027,11 +1031,96 @@ def install_customisations():
 			continue
 		installed[doctype] = defs
 
-	create_custom_fields(installed, update=True)
+	_create_custom_fields_safely(installed)
+	_sync_missing_columns(installed)
 
 	_apply_property_setters()
 	_unrequire_stray_custom_fields()
 	frappe.clear_cache()
+
+
+# Fieldtypes that live only in the form layout — they never get a DB column,
+# so they must be excluded from the column reconciliation below.
+LAYOUT_ONLY_FIELDTYPES = {
+	"Section Break",
+	"Column Break",
+	"Tab Break",
+	"Table",
+	"Table MultiSelect",
+	"HTML",
+	"Button",
+	"Heading",
+	"Fold",
+}
+
+
+def _create_custom_fields_safely(fields_by_doctype: dict):
+	"""Install the custom fields without letting one bad definition sink the rest.
+
+	`create_custom_fields` walks every doctype and every field in a single
+	loop, and it only swallows DuplicateEntryError. Any other failure escapes
+	and aborts the whole run — so every field after the failing one is never
+	created, and, worse, the batched `frappe.db.updatedb()` at the end of that
+	function never executes. The result is a site whose Custom Field rows and
+	form layout look right while the underlying table has no columns, which
+	surfaces much later as `Unknown column 'custom_trip_start' in 'SET'`.
+
+	So: try each doctype as its own batch (fast path), and if that batch
+	fails, retry that doctype field by field so only the genuinely broken
+	definition is lost.
+	"""
+	for doctype, defs in fields_by_doctype.items():
+		try:
+			create_custom_fields({doctype: defs}, update=True)
+			continue
+		except Exception:
+			frappe.log_error(
+				frappe.get_traceback(),
+				f"Thameen ERP: custom field batch failed for {doctype}",
+			)
+
+		for df in defs:
+			try:
+				create_custom_fields({doctype: [df]}, update=True)
+			except Exception:
+				frappe.log_error(
+					frappe.get_traceback(),
+					f"Thameen ERP: custom field {doctype}.{df.get('fieldname')}",
+				)
+
+
+def _sync_missing_columns(fields_by_doctype: dict):
+	"""Make sure every field we just defined actually has a column behind it.
+
+	This is the safety net for the failure described above, and for sites where
+	a previous version of this app aborted mid-install. `updatedb` is
+	idempotent, so it costs nothing on a healthy site.
+	"""
+	for doctype, defs in fields_by_doctype.items():
+		wanted = [
+			df["fieldname"]
+			for df in defs
+			if df.get("fieldtype") not in LAYOUT_ONLY_FIELDTYPES and df.get("fieldname")
+		]
+		if not wanted:
+			continue
+
+		try:
+			missing = [f for f in wanted if not frappe.db.has_column(doctype, f)]
+		except Exception:
+			continue
+
+		if not missing:
+			continue
+
+		frappe.clear_cache(doctype=doctype)
+		try:
+			frappe.db.updatedb(doctype)
+		except Exception:
+			frappe.log_error(
+				frappe.get_traceback(),
+				f"Thameen ERP: could not add columns {missing} to {doctype}",
+			)
 
 
 def _unrequire_stray_custom_fields():
