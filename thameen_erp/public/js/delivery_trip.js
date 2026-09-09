@@ -558,6 +558,21 @@ function usable_on_truck(check) {
 	return (check.rows || []).reduce((sum, r) => sum + flt(r.on_truck_free), 0);
 }
 
+// ---------------------------------------------------------------------------
+// Vehicle eligibility inside the Split Trip dialog
+//
+// A pure Sales-Order trip loads from the yard: an empty truck contributes
+// nothing to the split until someone loads it separately, so the picker is
+// restricted to trucks already carrying stock. A trip backed by a Purchase
+// Order (or Direct from Supplier generally) will be filled by a Purchase
+// Receipt straight onto whichever truck is chosen, so an empty truck is a
+// perfectly good pick there — the restriction does not apply.
+// ---------------------------------------------------------------------------
+
+function restrict_split_to_loaded_vehicles(frm) {
+	return frm.doc.custom_supply_source === "Own Warehouse" && !frm.doc.custom_purchase_order;
+}
+
 function offer_split(frm, load, check) {
 	const committed_rows = (load.committed_trips || [])
 		.map(
@@ -626,6 +641,10 @@ function offer_split(frm, load, check) {
 			});
 		},
 	});
+
+	// Set once, before the first render — vehicle_select_html reads this on
+	// every re-render so the rule stays in force for the life of the dialog.
+	dialog.restrict_to_loaded_vehicles = restrict_split_to_loaded_vehicles(frm);
 
 	dialog.fields_dict.use_capacity.$input.on("change", () => refresh_plan(frm, dialog));
 	dialog.show();
@@ -821,26 +840,36 @@ function prune_empty_loads(dialog) {
 
 function vehicle_select_html(dialog, value, cls, index) {
 	const taken = taken_vehicles(dialog, index);
+
+	let candidates = (dialog.vehicles || []).filter((v) => v.name === value || !taken.has(v.name));
+
+	// Sales-Order-only trips: keep the picker to trucks that already have
+	// something on them. An empty truck is not a valid pick here because
+	// nothing is going to load it as part of this split. The current
+	// selection is always kept visible even if empty, so switching AWAY
+	// from an already-picked empty truck is still possible.
+	if (dialog.restrict_to_loaded_vehicles) {
+		candidates = candidates.filter((v) => v.name === value || flt(v.on_truck) > 0);
+	}
+
 	const opts = [`<option value="">${__("— choose later —")}</option>`]
 		.concat(
-			(dialog.vehicles || [])
-				.filter((v) => v.name === value || !taken.has(v.name))
-				.map((v) => {
-					const free = flt(v.free !== undefined ? v.free : v.available);
-					// What it is carrying, so an empty truck is obvious at a
-					// glance. Trucks holding a different cement are already
-					// filtered out server-side.
-					const holding = (v.on_truck_items || []).length
-						? (v.on_truck_items || [])
-								.map((i) => `${i.item_code} ${format_number(i.qty)}`)
-								.join(", ")
-						: __("empty");
-					return (
-						`<option value="${frappe.utils.escape_html(v.name)}" ${v.name === value ? "selected" : ""}>` +
-						`${frappe.utils.escape_html(v.name)} · ${__("free")} ${format_number(free)} ${__("of")} ${format_number(v.capacity)}` +
-						` · ${frappe.utils.escape_html(holding)}</option>`
-					);
-				})
+			candidates.map((v) => {
+				const free = flt(v.free !== undefined ? v.free : v.available);
+				// What it is carrying, so an empty truck is obvious at a
+				// glance. Trucks holding a different cement are already
+				// filtered out server-side.
+				const holding = (v.on_truck_items || []).length
+					? (v.on_truck_items || [])
+							.map((i) => `${i.item_code} ${format_number(i.qty)}`)
+							.join(", ")
+					: __("empty");
+				return (
+					`<option value="${frappe.utils.escape_html(v.name)}" ${v.name === value ? "selected" : ""}>` +
+					`${frappe.utils.escape_html(v.name)} · ${__("free")} ${format_number(free)} ${__("of")} ${format_number(v.capacity)}` +
+					` · ${frappe.utils.escape_html(holding)}</option>`
+				);
+			})
 		)
 		.join("");
 	return `<select class="form-control input-xs ${cls}" data-index="${index}">${opts}</select>`;
