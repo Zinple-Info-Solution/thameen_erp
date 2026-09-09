@@ -112,8 +112,13 @@ doc_events = {
 		"validate": "thameen_erp.overrides.fleet_expense.set_cost_center_from_vehicle",
 	},
 	"Sales Invoice": {
-		"validate": "thameen_erp.overrides.sales_invoice.validate",
-	},
+        "before_validate": "thameen_erp.overrides.sales_invoice.before_validate",
+        "validate": "thameen_erp.overrides.sales_invoice.validate",
+        "on_update": "thameen_erp.overrides.sales_invoice.on_update",
+        "on_submit": "thameen_erp.overrides.sales_invoice.on_submit",
+        "on_cancel": "thameen_erp.overrides.sales_invoice.on_cancel",
+        "on_trash": "thameen_erp.overrides.sales_invoice.on_trash",
+    }
 }
 
 # ---------------------------------------------------------------------------
