@@ -83,8 +83,17 @@ doc_events = {
 		"on_cancel": "thameen_erp.overrides.procurement.purchase_order_on_cancel",
 	},
 	"Purchase Invoice": {
+		# before_validate must run first: it rewrites item.rate for the rebate so
+		# ERPNext's own amount / net_total / grand_total calculation picks it up.
+		"before_validate": "thameen_erp.overrides.purchase_invoice.before_validate",
 		"validate": "thameen_erp.overrides.purchase.validate_purchase_invoice",
-		"on_submit": "thameen_erp.overrides.purchase.flag_expected_credit_notes",
+		"on_update": "thameen_erp.overrides.purchase_invoice.on_update",
+		"on_submit": [
+			"thameen_erp.overrides.purchase.flag_expected_credit_notes",
+			"thameen_erp.overrides.purchase_invoice.on_submit",
+		],
+		"on_cancel": "thameen_erp.overrides.purchase_invoice.on_cancel",
+		"on_trash": "thameen_erp.overrides.purchase_invoice.on_trash",
 	},
 	# Direct-from-supplier trips: keep the trip's receipt/order links honest
 	# when purchasing cancels something underneath them.
@@ -112,13 +121,8 @@ doc_events = {
 		"validate": "thameen_erp.overrides.fleet_expense.set_cost_center_from_vehicle",
 	},
 	"Sales Invoice": {
-        "before_validate": "thameen_erp.overrides.sales_invoice.before_validate",
-        "validate": "thameen_erp.overrides.sales_invoice.validate",
-        "on_update": "thameen_erp.overrides.sales_invoice.on_update",
-        "on_submit": "thameen_erp.overrides.sales_invoice.on_submit",
-        "on_cancel": "thameen_erp.overrides.sales_invoice.on_cancel",
-        "on_trash": "thameen_erp.overrides.sales_invoice.on_trash",
-    }
+		"validate": "thameen_erp.overrides.sales_invoice.validate",
+	},
 }
 
 # ---------------------------------------------------------------------------

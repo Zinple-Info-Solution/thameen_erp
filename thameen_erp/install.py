@@ -891,8 +891,46 @@ def get_custom_fields() -> dict:
 				"options": "Vehicle",
 				"insert_after": "cost_center",
 			},
+			# Supplier rebate — percentage comes from the Item master, the
+			# amount is derived in thameen_erp.overrides.purchase_invoice.
+			# in_list_view so both are visible in the Items grid without
+			# expanding the row.
+			{
+				"fieldname": "custom_rebate_percentage",
+				"label": "Rebate %",
+				"fieldtype": "Float",
+				"fetch_from": "item_code.custom_rebate_percentage",
+				"fetch_if_empty": 1,
+				"in_list_view": 1,
+				"columns": 1,
+				"insert_after": "custom_credit_note_received",
+			},
+			{
+				"fieldname": "custom_rebate_amount",
+				"label": "Rebate Amount",
+				"fieldtype": "Currency",
+				"read_only": 1,
+				"in_list_view": 1,
+				"columns": 1,
+				"insert_after": "custom_rebate_percentage",
+			},
 		],
-		"Purchase Invoice": vehicle_expense_block,
+		"Purchase Invoice": vehicle_expense_block
+		+ [
+			{
+				"fieldname": "custom_rebate_section",
+				"label": "Rebate",
+				"fieldtype": "Section Break",
+				"insert_after": "due_date",
+			},
+			{
+				"fieldname": "custom_add_rebate",
+				"label": "Add Rebate",
+				"fieldtype": "Check",
+				"description": "Reduce each item's rate by its rebate percentage.",
+				"insert_after": "custom_rebate_section",
+			},
+		],
 		"Journal Entry": vehicle_expense_block,
 		"Journal Entry Account": [
 			{
