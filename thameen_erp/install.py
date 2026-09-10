@@ -891,8 +891,46 @@ def get_custom_fields() -> dict:
 				"options": "Vehicle",
 				"insert_after": "cost_center",
 			},
+			# Supplier rebate — percentage comes from the Item master, the
+			# amount is derived in thameen_erp.overrides.purchase_invoice.
+			# in_list_view so both are visible in the Items grid without
+			# expanding the row.
+			{
+				"fieldname": "custom_rebate_percentage",
+				"label": "Rebate %",
+				"fieldtype": "Float",
+				"fetch_from": "item_code.custom_rebate_percentage",
+				"fetch_if_empty": 1,
+				"in_list_view": 1,
+				"columns": 1,
+				"insert_after": "custom_credit_note_received",
+			},
+			{
+				"fieldname": "custom_rebate_amount",
+				"label": "Rebate Amount",
+				"fieldtype": "Currency",
+				"read_only": 1,
+				"in_list_view": 1,
+				"columns": 1,
+				"insert_after": "custom_rebate_percentage",
+			},
 		],
-		"Purchase Invoice": vehicle_expense_block,
+		"Purchase Invoice": vehicle_expense_block
+		+ [
+			{
+				"fieldname": "custom_rebate_section",
+				"label": "Rebate",
+				"fieldtype": "Section Break",
+				"insert_after": "due_date",
+			},
+			{
+				"fieldname": "custom_add_rebate",
+				"label": "Add Rebate",
+				"fieldtype": "Check",
+				"description": "Reduce each item's rate by its rebate percentage.",
+				"insert_after": "custom_rebate_section",
+			},
+		],
 		"Journal Entry": vehicle_expense_block,
 		"Journal Entry Account": [
 			{
@@ -1211,6 +1249,36 @@ def _apply_property_setters():
 			"vehicle,driver,status,custom_sales_order,custom_purchase_order",
 			"Data",
 		),
+		# ------------------------------------------------------------------
+		# Sales Order / Sales Invoice form slimming.
+		#
+		# Cement distribution runs in one currency off one price list, with no
+		# shipping rules, no Incoterms and no barcode scanning, so these
+		# sections are noise on every order. Hiding a Section Break or a Tab
+		# Break hides everything inside it, which is why the sections are
+		# hidden rather than each field individually.
+		#
+		# Nothing is deleted — clearing the Property Setter (or unticking
+		# Hidden in Customize Form) brings any of them straight back.
+		# ------------------------------------------------------------------
+		*[
+			(doctype, fieldname, "hidden", "1", "Check")
+			for doctype in ("Sales Order", "Sales Invoice")
+			for fieldname in (
+				"accounting_dimensions_section",
+				"currency_and_price_list",
+				"shipping_rule",
+				"incoterm",
+				"named_place",
+				"scan_barcode",
+			)
+		],
+		# The "More Info" tab is a Tab Break on both, but they do not share a
+		# fieldname: Sales Order calls it `more_info`, Sales Invoice
+		# `more_info_tab` (where `more_info` is the Accounting Details section
+		# inside that tab).
+		("Sales Order", "more_info", "hidden", "1", "Check"),
+		("Sales Invoice", "more_info_tab", "hidden", "1", "Check"),
 	]
 	for doctype, fieldname, prop, value, prop_type in setters:
 		try:

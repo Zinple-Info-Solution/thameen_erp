@@ -7,7 +7,7 @@
  "engine": "InnoDB",
  "field_order": [
   "section_break_gq95",
-  "customer",
+  "supplier",
   "item",
   "percentage",
   "column_break_ndgd",
@@ -27,12 +27,12 @@
    "fieldtype": "Section Break"
   },
   {
-   "fieldname": "customer",
+   "fieldname": "supplier",
    "fieldtype": "Link",
    "in_list_view": 1,
    "in_standard_filter": 1,
-   "label": "Customer",
-   "options": "Customer"
+   "label": "Supplier",
+   "options": "Supplier"
   },
   {
    "fieldname": "item",
@@ -66,8 +66,8 @@
    "in_list_view": 1,
    "in_preview": 1,
    "in_standard_filter": 1,
-   "label": "Invoice",
-   "options": "Sales Invoice"
+   "label": "Purchase Invoice",
+   "options": "Purchase Invoice"
   },
   {
    "fieldname": "quantity",
