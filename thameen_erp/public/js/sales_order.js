@@ -39,9 +39,11 @@ function open_so_planner(frm, data) {
 			{
 				fieldname: "vehicle", fieldtype: "Link", options: "Vehicle", label: __("Plan by truck"),
 				description: __("Splits every line by this truck's capacity, one trip per day. Edit afterwards."),
+				// No status filter: the server offers every truck that is not
+				// in the workshop and not already held by another open trip.
 				get_query: () => ({
 					query: "thameen_erp.overrides.vehicle_stock.vehicle_query",
-					filters: { custom_status: ["in", ["Available", "Assigned"]] },
+					filters: {},
 				}),
 				onchange: () => {
 					const v = dialog.get_value("vehicle");

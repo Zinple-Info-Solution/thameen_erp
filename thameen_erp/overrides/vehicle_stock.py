@@ -176,8 +176,15 @@ def vehicle_query(doctype, txt, searchfield, start, page_len, filters):
 	"""Link-field query for Delivery Trip.vehicle.
 
 	Shows "free 120 of 300 · on truck: OPC-43 200" under each plate so the
-	dispatcher sees the stock without opening the Vehicle. Only Available /
-	Assigned trucks are offered; one Under Maintenance or On Trip is not.
+	dispatcher sees the stock without opening the Vehicle.
+
+	Which plates appear
+	    Every truck that is not in the workshop and is not already held by
+	    another open trip — so the list answers "what can I send today".
+	    Trucks with no Capacity rated (or no warehouse behind them) are left
+	    out: they cannot carry a planned load. The rules live in
+	    thameen_erp.overrides.vehicle_load so this query and the planning
+	    dialogs cannot drift apart.
 
 	Item conflict
 	    A truck already carrying a DIFFERENT cement is not offered at all.
@@ -196,8 +203,14 @@ def vehicle_query(doctype, txt, searchfield, start, page_len, filters):
 	    otherwise offer a truck that is actually full. Pass `trip` so the trip
 	    being planned is not counted against its own truck.
 	"""
+	from thameen_erp.overrides.vehicle_load import (
+		PLANNABLE_STATUSES,
+		is_configured_truck,
+		vehicles_booked_on_other_trips,
+	)
+
 	filters = filters or {}
-	statuses = filters.get("custom_status") or ["Available", "Assigned"]
+	statuses = filters.get("custom_status") or list(PLANNABLE_STATUSES)
 	if isinstance(statuses, (list, tuple)) and len(statuses) == 2 and statuses[0] == "in":
 		statuses = statuses[1]
 
@@ -223,6 +236,21 @@ def vehicle_query(doctype, txt, searchfield, start, page_len, filters):
 		# silently hide candidates. `get_all` otherwise caps at 20.
 		limit_page_length=0,
 	)
+
+	# Two rules shared with the planning dialogs, so both pickers agree on
+	# what "free" means (see PLANNABLE_STATUSES / BOOKED_TRIP_STATES):
+	#   * a Vehicle with no Capacity or no warehouse cannot carry a planned
+	#     load, so it is not offered;
+	#   * a truck another open trip already has is not offered either.
+	vehicles = [
+		v
+		for v in vehicles
+		if is_configured_truck(v.custom_capacity, v.custom_vehicle_warehouse)
+	]
+	booked = vehicles_booked_on_other_trips(
+		[v.name for v in vehicles], exclude_trip=exclude_trip
+	)
+	vehicles = [v for v in vehicles if v.name not in booked]
 
 	warehouses = [v.custom_vehicle_warehouse for v in vehicles if v.custom_vehicle_warehouse]
 	stock = {}

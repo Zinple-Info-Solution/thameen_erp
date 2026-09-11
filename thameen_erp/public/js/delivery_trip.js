@@ -44,11 +44,13 @@ frappe.ui.form.on("Delivery Trip", {
 		// what is physically on the truck right now. `items` hides trucks
 		// already carrying a different cement; `trip` stops this trip
 		// counting against its own truck when free space is worked out.
+		// The status filter is deliberately NOT pinned here: whether a truck
+		// is busy is decided by the trip table server-side, not by the
+		// cached `custom_status` field, so a truck left on "On Trip" by a
+		// hook that did not fire still shows up once its trips are done.
 		frm.set_query("vehicle", () => ({
 			query: "thameen_erp.overrides.vehicle_stock.vehicle_query",
 			filters: {
-				custom_status: ["in", ["Available", "Assigned"]],
-				
 				trip: frm.is_new() ? null : frm.doc.name,
 			},
 		}));
@@ -559,21 +561,51 @@ function usable_on_truck(check) {
 }
 
 // ---------------------------------------------------------------------------
-// Vehicle eligibility inside the Split Trip dialog
+// Item names in the Split Trip dialog
 //
-// A pure Sales-Order trip loads from the yard: an empty truck contributes
-// nothing to the split until someone loads it separately, so the picker is
-// restricted to trucks already carrying stock. A trip backed by a Purchase
-// Order (or Direct from Supplier generally) will be filled by a Purchase
-// Receipt straight onto whichever truck is chosen, so an empty truck is a
-// perfectly good pick there — the restriction does not apply.
+// The split payload identifies items by code, but dispatch reads names. The
+// trip's own rows already carry item_name, so that map is free; anything the
+// truck is carrying that is not on this trip is looked up once when the dialog
+// opens. Falls back to the code whenever a name is not known, so a missing
+// lookup degrades to the old display rather than to a blank cell.
 // ---------------------------------------------------------------------------
 
-function restrict_split_to_loaded_vehicles(frm) {
-	return frm.doc.custom_supply_source === "Own Warehouse" && !frm.doc.custom_purchase_order;
+function seed_item_names(frm) {
+	const names = {};
+	(frm.doc.items || []).forEach((row) => {
+		if (row.item_code && row.item_name) names[row.item_code] = row.item_name;
+	});
+	return names;
+}
+
+function item_label(dialog, code) {
+	if (!code) return "";
+	return (dialog.item_names || {})[code] || code;
+}
+
+// Pull names for any code that showed up in the payload but is not on the
+// trip, then re-render so the table swaps codes for names in place.
+function fetch_missing_item_names(dialog, codes, on_done) {
+	const missing = Array.from(new Set(codes.filter((c) => c && !(dialog.item_names || {})[c])));
+	if (!missing.length) {
+		on_done();
+		return;
+	}
+	frappe.db
+		.get_list("Item", {
+			filters: { name: ["in", missing] },
+			fields: ["name", "item_name"],
+			limit: 0,
+		})
+		.then((rows) => {
+			(rows || []).forEach((r) => (dialog.item_names[r.name] = r.item_name || r.name));
+			on_done();
+		})
+		.catch(on_done);
 }
 
 function offer_split(frm, load, check) {
+	const item_names = seed_item_names(frm);
 	const committed_rows = (load.committed_trips || [])
 		.map(
 			(trip) =>
@@ -601,7 +633,7 @@ function offer_split(frm, load, check) {
 			${short_rows
 				.map(
 					(r) =>
-						`<b>${frappe.utils.escape_html(r.item_code)}</b> ${__("short")} ${format_number(r.shortfall)}`
+						`<b>${frappe.utils.escape_html(item_names[r.item_code] || r.item_code)}</b> ${__("short")} ${format_number(r.shortfall)}`
 				)
 				.join(", ")}.
 			${__("Plan the journeys you can load now — the rest needs buying before it can go.")}
@@ -613,23 +645,17 @@ function offer_split(frm, load, check) {
 		size: "extra-large",
 		fields: [
 			{ fieldtype: "HTML", fieldname: "summary", options: shortfall_note + why },
-			{
-				fieldname: "use_capacity",
-				fieldtype: "Check",
-				label: __("Plan against full capacity"),
-			},
 			{ fieldtype: "Section Break" },
 			{ fieldtype: "HTML", fieldname: "plan" },
 		],
 		primary_action_label: __("Split into Several Trips"),
 		primary_action() {
-			const use_capacity = dialog.get_value("use_capacity") ? 1 : 0;
 			frappe.call({
 				method: "thameen_erp.overrides.vehicle_load.split_trip",
 				args: {
 					trip: frm.doc.name,
 					vehicle: frm.doc.vehicle,
-					use_capacity,
+					use_capacity: 0,
 					plan: JSON.stringify(collect_plan(dialog)),
 				},
 				freeze: true,
@@ -642,11 +668,7 @@ function offer_split(frm, load, check) {
 		},
 	});
 
-	// Set once, before the first render — vehicle_select_html reads this on
-	// every re-render so the rule stays in force for the life of the dialog.
-	dialog.restrict_to_loaded_vehicles = restrict_split_to_loaded_vehicles(frm);
-
-	dialog.fields_dict.use_capacity.$input.on("change", () => refresh_plan(frm, dialog));
+	dialog.item_names = item_names;
 	dialog.show();
 	refresh_plan(frm, dialog);
 }
@@ -660,7 +682,7 @@ function refresh_plan(frm, dialog) {
 		args: {
 			trip: frm.doc.name,
 			vehicle: frm.doc.vehicle,
-			use_capacity: dialog.get_value("use_capacity") ? 1 : 0,
+			use_capacity: 0,
 		},
 		callback({ message }) {
 			if (!message || !message.loads) {
@@ -675,12 +697,19 @@ function refresh_plan(frm, dialog) {
 				items: load.items.map((i) => ({ item_code: i.item_code, uom: i.uom, qty: flt(i.qty) })),
 			}));
 			dialog.vehicles = message.vehicles || [];
-			dialog.plan_use_capacity = dialog.get_value("use_capacity") ? 1 : 0;
+			dialog.plan_use_capacity = 0;
 			dialog.totals = {};
 			dialog.plan.forEach((l) => l.items.forEach((i) => (dialog.totals[i.item_code] = flt(dialog.totals[i.item_code]) + i.qty)));
 			// Size every row against the truck on it before the first render.
 			reflow_plan(dialog);
-			render_plan(frm, dialog);
+
+			const codes = Object.keys(dialog.totals).concat(
+				(dialog.vehicles || []).reduce(
+					(acc, v) => acc.concat((v.on_truck_items || []).map((i) => i.item_code)),
+					[]
+				)
+			);
+			fetch_missing_item_names(dialog, codes, () => render_plan(frm, dialog));
 		},
 	});
 }
@@ -703,6 +732,13 @@ function refresh_plan(frm, dialog) {
 // ---------------------------------------------------------------------------
 
 const PLAN_TOL = 0.001;
+
+// <input type="datetime-local"> needs "YYYY-MM-DDTHH:mm" and Frappe's
+// Datetime fields store "YYYY-MM-DD HH:mm:ss" — these two convert between them.
+function combine_departure(date_val, time_val) {
+	if (!date_val) return "";
+	return `${date_val} ${time_val || "00:00"}:00`;
+}
 
 function load_total(load) {
 	return (load.items || []).reduce((sum, item) => sum + flt(item.qty), 0);
@@ -841,33 +877,21 @@ function prune_empty_loads(dialog) {
 function vehicle_select_html(dialog, value, cls, index) {
 	const taken = taken_vehicles(dialog, index);
 
-	let candidates = (dialog.vehicles || []).filter((v) => v.name === value || !taken.has(v.name));
-
-	// Sales-Order-only trips: keep the picker to trucks that already have
-	// something on them. An empty truck is not a valid pick here because
-	// nothing is going to load it as part of this split. The current
-	// selection is always kept visible even if empty, so switching AWAY
-	// from an already-picked empty truck is still possible.
-	if (dialog.restrict_to_loaded_vehicles) {
-		candidates = candidates.filter((v) => v.name === value || flt(v.on_truck) > 0);
-	}
+	// Every truck the server returned is offered, minus the ones already
+	// picked on another row (a truck carries one load per plan), and minus
+	// trucks with nothing on them — an empty truck has nothing to check this
+	// split against. The currently selected truck is always kept, even if
+	// empty, so the dropdown never silently drops what's already chosen.
+	const candidates = (dialog.vehicles || []).filter(
+		(v) => v.name === value || (!taken.has(v.name) && flt(v.on_truck) > 0)
+	);
 
 	const opts = [`<option value="">${__("— choose later —")}</option>`]
 		.concat(
 			candidates.map((v) => {
-				const free = flt(v.free !== undefined ? v.free : v.available);
-				// What it is carrying, so an empty truck is obvious at a
-				// glance. Trucks holding a different cement are already
-				// filtered out server-side.
-				const holding = (v.on_truck_items || []).length
-					? (v.on_truck_items || [])
-							.map((i) => `${i.item_code} ${format_number(i.qty)}`)
-							.join(", ")
-					: __("empty");
 				return (
 					`<option value="${frappe.utils.escape_html(v.name)}" ${v.name === value ? "selected" : ""}>` +
-					`${frappe.utils.escape_html(v.name)} · ${__("free")} ${format_number(free)} ${__("of")} ${format_number(v.capacity)}` +
-					` · ${frappe.utils.escape_html(holding)}</option>`
+					`${frappe.utils.escape_html(v.name)} · ${__("capacity")} ${format_number(v.capacity)}`
 				);
 			})
 		)
@@ -887,7 +911,7 @@ function vehicle_state_html(dialog, load) {
 
 	const lines = (v.on_truck_items || []).length
 		? (v.on_truck_items || [])
-				.map((i) => `${frappe.utils.escape_html(i.item_code)} <b>${format_number(i.qty)}</b>`)
+				.map((i) => `${frappe.utils.escape_html(item_label(dialog, i.item_code))} <b>${format_number(i.qty)}</b>`)
 				.join("<br>")
 		: `<b>${format_number(v.on_truck)}</b>`;
 
@@ -911,7 +935,7 @@ function render_plan(frm, dialog) {
 						.map(
 							(i, k) =>
 								`<div class="d-flex align-items-center mb-1">
-									<span style="min-width:90px">${frappe.utils.escape_html(i.item_code)}</span>
+									<span style="min-width:140px">${frappe.utils.escape_html(item_label(dialog, i.item_code))}</span>
 									<input type="text" inputmode="decimal" class="form-control input-xs plan-qty no-spin" style="width:110px"
 										data-index="${index}" data-item="${k}" value="${i.qty}">
 									<span class="text-muted small ml-1">${frappe.utils.escape_html(i.uom || "")}</span>
@@ -919,21 +943,32 @@ function render_plan(frm, dialog) {
 						)
 						.join("")
 				: `<span class="text-muted small">${__("nothing on this trip")}</span>`;
+			// Numbered in plan order — "Trip 1" is this trip, the rest are the
+			// new ones. The trip ID is deliberately left off: dispatch reads
+			// the sequence, and row 1's ID is already in the form title.
 			const label =
-				index === 0
-					? `<b>${__("This trip")}</b><br><span class="text-muted small">${frm.doc.name}</span>`
-					: `<b>${__("New trip {0}", [index + 1])}</b>` +
-					  (plan.length > 2 ? `<br><a class="small text-danger plan-remove" data-index="${index}">${__("remove")}</a>` : "");
+				`<b>${__("Trip {0}", [index + 1])}</b>` +
+				(index > 0 && plan.length > 2
+					? `<br><a class="small text-danger plan-remove" data-index="${index}">${__("remove")}</a>`
+					: "");
+			// The Total column is gone — the plan total sits above the table.
+			// The two things that lived in that cell and are not just the
+			// number (the over-capacity warning and the "auto" reset) move
+			// under the vehicle picker, next to the truck they are about.
+			const notes =
+				(over ? `<div class="text-danger small">${__("over by {0}", [format_number(total - free)])}</div>` : "") +
+				(load.manual ? `<div><a class="small text-muted plan-auto" data-index="${index}">${__("auto")}</a></div>` : "");
 			return `<tr class="${over ? "table-warning" : ""}">
 				<td>${label}</td>
 				<td>${items}</td>
-				<td class="text-right"><b>${format_number(total)}</b>
-					${over ? `<br><span class="text-danger small">${__("over by {0}", [format_number(total - free)])}</span>` : ""}
-					${load.manual ? `<br><a class="small text-muted plan-auto" data-index="${index}">${__("auto")}</a>` : ""}</td>
-				<td>${vehicle_select_html(dialog, load.vehicle, "plan-vehicle", index)}</td>
+				<td>${vehicle_select_html(dialog, load.vehicle, "plan-vehicle", index)}${notes}</td>
 				<td>${vehicle_state_html(dialog, load)}</td>
-				<td><input type="date" class="form-control input-xs plan-date" data-index="${index}"
-					value="${(load.departure_time || "").slice(0, 10)}"></td>
+				<td>
+	<input type="date" class="form-control input-xs plan-date" data-index="${index}"
+		value="${(load.departure_time || "").slice(0, 10)}">
+	<input type="time" class="form-control input-xs plan-time mt-1" data-index="${index}"
+		value="${(load.departure_time || "").slice(11, 16)}">
+</td>
 			</tr>`;
 		})
 		.join("");
@@ -950,7 +985,7 @@ function render_plan(frm, dialog) {
 		.map(
 			(b) =>
 				`<span class="${Math.abs(b.diff) < PLAN_TOL ? "text-success" : "text-danger"} mr-3">` +
-				`${frappe.utils.escape_html(b.code)}: ${format_number(placed[b.code])} / ${format_number(dialog.totals[b.code])}` +
+				`${frappe.utils.escape_html(item_label(dialog, b.code))}: ${format_number(placed[b.code])} / ${format_number(dialog.totals[b.code])}` +
 				(Math.abs(b.diff) < PLAN_TOL ? " ✓" : ` (${b.diff > 0 ? "+" : ""}${format_number(b.diff)})`) +
 				`</span>`
 		)
@@ -972,7 +1007,10 @@ function render_plan(frm, dialog) {
 
 	wrapper.html(`
 		<div class="d-flex justify-content-between align-items-center mb-2">
-			<span class="small text-muted">${__("{0} trip(s)", [plan.length])}</span>
+			<span class="small text-muted">
+				${__("{0} trip(s)", [plan.length])}
+				· ${__("total qty")} <b>${format_number(plan_grand_total(dialog))}</b>
+			</span>
 			<span>
 				<button class="btn btn-xs btn-default plan-add">${__("+ Add trip")}</button>
 				<button class="btn btn-xs btn-default plan-same-truck ml-1">${__("Same truck, one day apart")}</button>
@@ -980,10 +1018,9 @@ function render_plan(frm, dialog) {
 		</div>
 		<table class="table table-bordered small">
 			<thead><tr>
-				<th style="width:14%">${__("Trip")}</th>
+				<th style="width:10%">${__("Trip")}</th>
 				<th>${__("Items & qty")}</th>
-				<th class="text-right" style="width:9%">${__("Total")}</th>
-				<th style="width:24%">${__("Vehicle")}</th>
+				<th style="width:28%">${__("Vehicle")}</th>
 				<th style="width:16%">${__("Available stock")}</th>
 				<th style="width:13%">${__("Departure")}</th>
 			</tr></thead>
@@ -1045,8 +1082,19 @@ function render_plan(frm, dialog) {
 		render_plan(frm, dialog);
 	});
 	wrapper.find(".plan-date").on("change", function () {
-		plan[parseInt($(this).data("index"), 10)].departure_time = $(this).val();
-	});
+	const index = parseInt($(this).data("index"), 10);
+	plan[index].departure_time = combine_departure(
+		$(this).val(),
+		wrapper.find(`.plan-time[data-index="${index}"]`).val()
+	);
+});
+wrapper.find(".plan-time").on("change", function () {
+	const index = parseInt($(this).data("index"), 10);
+	plan[index].departure_time = combine_departure(
+		wrapper.find(`.plan-date[data-index="${index}"]`).val(),
+		$(this).val()
+	);
+});
 	wrapper.find(".plan-remove").on("click", function () {
 		const index = parseInt($(this).data("index"), 10);
 		plan.splice(index, 1);

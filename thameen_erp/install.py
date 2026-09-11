@@ -891,8 +891,46 @@ def get_custom_fields() -> dict:
 				"options": "Vehicle",
 				"insert_after": "cost_center",
 			},
+			# Supplier rebate — percentage comes from the Item master, the
+			# amount is derived in thameen_erp.overrides.purchase_invoice.
+			# in_list_view so both are visible in the Items grid without
+			# expanding the row.
+			{
+				"fieldname": "custom_rebate_percentage",
+				"label": "Rebate %",
+				"fieldtype": "Float",
+				"fetch_from": "item_code.custom_rebate_percentage",
+				"fetch_if_empty": 1,
+				"in_list_view": 1,
+				"columns": 1,
+				"insert_after": "custom_credit_note_received",
+			},
+			{
+				"fieldname": "custom_rebate_amount",
+				"label": "Rebate Amount",
+				"fieldtype": "Currency",
+				"read_only": 1,
+				"in_list_view": 1,
+				"columns": 1,
+				"insert_after": "custom_rebate_percentage",
+			},
 		],
-		"Purchase Invoice": vehicle_expense_block,
+		"Purchase Invoice": vehicle_expense_block
+		+ [
+			{
+				"fieldname": "custom_rebate_section",
+				"label": "Rebate",
+				"fieldtype": "Section Break",
+				"insert_after": "due_date",
+			},
+			{
+				"fieldname": "custom_add_rebate",
+				"label": "Add Rebate",
+				"fieldtype": "Check",
+				"description": "Reduce each item's rate by its rebate percentage.",
+				"insert_after": "custom_rebate_section",
+			},
+		],
 		"Journal Entry": vehicle_expense_block,
 		"Journal Entry Account": [
 			{
@@ -1035,6 +1073,7 @@ def install_customisations():
 	_sync_missing_columns(installed)
 
 	_apply_property_setters()
+	_apply_item_grid_columns()
 	_unrequire_stray_custom_fields()
 	frappe.clear_cache()
 
@@ -1211,6 +1250,67 @@ def _apply_property_setters():
 			"vehicle,driver,status,custom_sales_order,custom_purchase_order",
 			"Data",
 		),
+		# ------------------------------------------------------------------
+		# Sales Order / Sales Invoice form slimming.
+		#
+		# Cement distribution runs in one currency off one price list, with no
+		# shipping rules, no Incoterms and no barcode scanning, so these
+		# sections are noise on every order. Hiding a Section Break or a Tab
+		# Break hides everything inside it, which is why the sections are
+		# hidden rather than each field individually.
+		#
+		# Nothing is deleted — clearing the Property Setter (or unticking
+		# Hidden in Customize Form) brings any of them straight back.
+		# ------------------------------------------------------------------
+		*[
+			(doctype, fieldname, "hidden", "1", "Check")
+			for doctype in ("Sales Order", "Sales Invoice")
+			for fieldname in (
+				"accounting_dimensions_section",
+				"currency_and_price_list",
+				"shipping_rule",
+				"incoterm",
+				"named_place",
+				"scan_barcode",
+			)
+		],
+		# The "More Info" tab is a Tab Break on both, but they do not share a
+		# fieldname: Sales Order calls it `more_info`, Sales Invoice
+		# `more_info_tab` (where `more_info` is the Accounting Details section
+		# inside that tab).
+		("Sales Order", "more_info", "hidden", "1", "Check"),
+		("Sales Invoice", "more_info_tab", "hidden", "1", "Check"),
+		# ------------------------------------------------------------------
+		# Purchase Order / Purchase Receipt / Purchase Invoice form slimming.
+		#
+		# Same reasoning as the sales side above: one currency, one price
+		# list, no shipping rules, no Incoterms, no barcode scanning. On all
+		# three purchase doctypes the "More Info" tab is called
+		# `more_info_tab` (unlike Sales Order, where it is `more_info`).
+		#
+		# Nothing is deleted. Every one of these comes back by clearing the
+		# Property Setter, or by unticking Hidden in Customize Form.
+		# ------------------------------------------------------------------
+		*[
+			(doctype, fieldname, "hidden", "1", "Check")
+			for doctype in ("Purchase Order", "Purchase Receipt", "Purchase Invoice")
+			for fieldname in (
+				"accounting_dimensions_section",
+				"currency_and_price_list",
+				"shipping_rule",
+				"incoterm",
+				"named_place",
+				"scan_barcode",
+				"more_info_tab",
+			)
+		],
+		# Timesheet billing is a services feature — cement is sold by the
+		# tonne, never by the hour. Sales Invoice is the only one of these
+		# five doctypes that has a timesheet at all: the `time_sheet_list`
+		# section holds the `timesheets` table, so hiding the section hides
+		# the table with it. Sales Order / Purchase Order / Purchase Receipt
+		# / Purchase Invoice carry no timesheet fields, hence nothing to do.
+		("Sales Invoice", "time_sheet_list", "hidden", "1", "Check"),
 	]
 	for doctype, fieldname, prop, value, prop_type in setters:
 		try:
@@ -1219,6 +1319,132 @@ def _apply_property_setters():
 			)
 		except Exception:
 			frappe.log_error(frappe.get_traceback(), "Thameen ERP Property Setter")
+
+
+# ---------------------------------------------------------------------------
+# Item table (grid) columns
+# ---------------------------------------------------------------------------
+# What the yard and accounts actually read off the items grid, left to right.
+#
+# `in_list_view` controls the GRID COLUMNS only — every field stays on the
+# document and stays editable in the row's expanded form (the pencil / arrow
+# on each row). Nothing here removes a field or its behaviour.
+#
+# The grid's left-to-right order follows the child DocType's own field order,
+# not the order written below, so the date column lands where ERPNext keeps
+# it (just before Qty on Sales Order / Purchase Order, after Amount on
+# Purchase Receipt). Anyone who wants a different order can drag the columns
+# with the grid's own settings button — that is a per-user preference and it
+# wins over everything set here.
+#
+# Only the doctypes that HAVE a date field get one: Sales Order Item carries
+# `delivery_date`, Purchase Order / Purchase Receipt Item carry
+# `schedule_date` ("Required By"). Sales Invoice Item and Purchase Invoice
+# Item have no delivery date field at all — an invoice bills what already
+# moved — so those two simply have no date column to show.
+#
+# `actual_qty` is the field labelled "Qty (Warehouse)", and it is asked for on
+# Sales Order only: that is where knowing the stock on hand decides whether
+# the line can be promised.
+ITEM_GRID_COLUMNS = {
+	"Sales Order Item": [
+		"item_code",
+		"item_name",
+		"qty",
+		"uom",
+		"rate",
+		"delivery_date",
+		"amount",
+		"actual_qty",
+	],
+	"Sales Invoice Item": ["item_code", "item_name", "qty", "uom", "rate", "amount"],
+	"Purchase Order Item": [
+		"item_code",
+		"item_name",
+		"qty",
+		"uom",
+		"rate",
+		"schedule_date",
+		"amount",
+	],
+	"Purchase Receipt Item": [
+		"item_code",
+		"item_name",
+		"qty",
+		"uom",
+		"rate",
+		"schedule_date",
+		"amount",
+	],
+	"Purchase Invoice Item": ["item_code", "item_name", "qty", "uom", "rate", "amount"],
+}
+
+# Column widths in grid units. Frappe v15 drops any column past a total of
+# 10, so these are kept deliberately tight — eight columns at these widths
+# add up to exactly 10 and all of them survive on both v15 and v16.
+GRID_COLUMN_WIDTHS = {
+	"item_code": 2,
+	"item_name": 2,
+	"qty": 1,
+	"uom": 1,
+	"rate": 1,
+	"delivery_date": 1,
+	"schedule_date": 1,
+	"amount": 1,
+	"actual_qty": 1,
+}
+
+
+def _apply_item_grid_columns():
+	"""Show exactly the wanted columns in each items grid, and no others.
+
+	Columns are turned OFF by fieldname only when the field is a standard
+	ERPNext one — a custom field another app (or this one) put in the grid on
+	purpose is left where it is, since it is not ours to take away.
+	"""
+	for doctype, wanted in ITEM_GRID_COLUMNS.items():
+		if not frappe.db.exists("DocType", doctype):
+			continue
+
+		try:
+			meta = frappe.get_meta(doctype)
+		except Exception:
+			frappe.log_error(frappe.get_traceback(), f"Thameen ERP grid columns: {doctype}")
+			continue
+
+		wanted_set = set(wanted)
+		changes = []
+
+		for df in meta.fields:
+			if df.fieldtype in LAYOUT_ONLY_FIELDTYPES:
+				continue
+
+			if df.fieldname in wanted_set:
+				changes.append((df.fieldname, "in_list_view", "1", "Check"))
+				changes.append(
+					(
+						df.fieldname,
+						"columns",
+						str(GRID_COLUMN_WIDTHS.get(df.fieldname, 1)),
+						"Int",
+					)
+				)
+			elif df.in_list_view and not getattr(df, "is_custom_field", False):
+				# A standard column the grid shows today that is not on the
+				# list — e.g. Warehouse, or Rejected Qty on Purchase Receipt.
+				# It stays on the row, it just stops taking grid width.
+				changes.append((df.fieldname, "in_list_view", "0", "Check"))
+
+		for fieldname, prop, value, prop_type in changes:
+			try:
+				make_property_setter(doctype, fieldname, prop, value, prop_type)
+			except Exception:
+				frappe.log_error(
+					frappe.get_traceback(),
+					f"Thameen ERP grid column {doctype}.{fieldname}",
+				)
+
+		frappe.clear_cache(doctype=doctype)
 
 
 # ---------------------------------------------------------------------------

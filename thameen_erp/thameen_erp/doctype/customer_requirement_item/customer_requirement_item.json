@@ -22,14 +22,16 @@
    "options": "Item",
    "reqd": 1,
    "in_list_view": 1,
-   "columns": 3
+   "columns": 2
   },
   {
    "fieldname": "item_name",
    "fieldtype": "Data",
    "label": "Item Name",
    "fetch_from": "item_code.item_name",
-   "read_only": 1
+   "read_only": 1,
+   "in_list_view": 1,
+   "columns": 2
   },
   {
    "fieldname": "description",
@@ -42,7 +44,7 @@
    "label": "Qty",
    "reqd": 1,
    "in_list_view": 1,
-   "columns": 2
+   "columns": 1
   },
   {
    "fieldname": "uom",
@@ -77,8 +79,6 @@
    "fieldname": "delivery_location",
    "fieldtype": "Data",
    "label": "Delivery Location / Site",
-   "in_list_view": 1,
-   "columns": 2,
    "description": "Blank falls back to the site on the requirement header."
   }
  ],

@@ -45,6 +45,66 @@ from thameen_erp.overrides.trip_split import (
 # Submitted trips in these states are holding space on the truck.
 COMMITTED_STATES = ("Scheduled", "Loading", "In Transit")
 
+# ---------------------------------------------------------------------------
+# Which trucks a picker may offer
+# ---------------------------------------------------------------------------
+# Two rules, both deliberately in one place so they are easy to change:
+#
+# PLANNABLE_STATUSES
+#     A truck is offered unless the workshop has it. "On Trip" is included
+#     on purpose: that status is a cache written by hooks, and a truck whose
+#     trips are all finished but whose status was never written back was
+#     invisible to dispatch. Whether a truck is genuinely busy is answered
+#     by the trip table below, not by this field.
+#
+# BOOKED_TRIP_STATES
+#     A truck already promised to another submitted, open trip is not
+#     offered at all. Draft trips do NOT book a truck — an abandoned draft
+#     should not quietly take a truck out of circulation.
+PLANNABLE_STATUSES = ("Available", "Assigned", "On Trip")
+BOOKED_TRIP_STATES = COMMITTED_STATES
+
+
+def vehicles_booked_on_other_trips(vehicles, exclude_trip=None):
+	"""{vehicle: trip} for trucks another open trip already has.
+
+	One query for the whole candidate list rather than one per truck.
+	"""
+	if not vehicles:
+		return {}
+
+	rows = frappe.get_all(
+		"Delivery Trip",
+		filters={
+			"vehicle": ("in", list(vehicles)),
+			"docstatus": 1,
+			"status": ("in", BOOKED_TRIP_STATES),
+		},
+		fields=["name", "vehicle"],
+		limit_page_length=0,
+	)
+
+	booked = {}
+	for row in rows:
+		if exclude_trip and row.name == exclude_trip:
+			continue
+		booked.setdefault(row.vehicle, row.name)
+	return booked
+
+
+def is_configured_truck(capacity, warehouse):
+	"""A truck that can actually be planned against.
+
+	A Vehicle with no Capacity rated, or with no vehicle warehouse behind
+	it, cannot hold a load or be split against one — the planner has no
+	number to work with. Those records showed up in the dropdowns as
+	"no capacity set" and could only ever be picked by mistake, so they are
+	left out of the pickers instead. The Vehicle itself is untouched;
+	setting Capacity (and letting the app create its warehouse) brings it
+	straight back.
+	"""
+	return bool(flt(capacity)) and bool(warehouse)
+
 
 # ---------------------------------------------------------------------------
 # Reading the load
@@ -302,12 +362,16 @@ def preview_split(trip, vehicle=None, use_capacity=0):
 			exclude_trip=trip,
 			on_date=doc.get("departure_time"),
 			items=[row.item_code for row in (doc.get("custom_trip_items") or []) if row.item_code],
+			# The split dialog seeds the first load with the trip's own truck.
+			# If the picker did not offer it, that first row would come up
+			# blank and the truck would be dropped on save.
+			always_include=vehicle,
 		),
 	}
 
 
 @frappe.whitelist()
-def list_vehicles_for_planning(exclude_trip=None, on_date=None, items=None):
+def list_vehicles_for_planning(exclude_trip=None, on_date=None, items=None, always_include=None):
 	"""Plates with capacity / free space / on-truck, for the planning dialogs.
 
 	Every figure is computed here rather than read from the stored fields on
@@ -327,6 +391,18 @@ def list_vehicles_for_planning(exclude_trip=None, on_date=None, items=None):
 	Pass `items` (the trip's item codes) to drop trucks already carrying a
 	DIFFERENT cement — mixing grades in one tank contaminates both. Empty
 	trucks and trucks holding the same item are kept.
+
+	Three things never reach the dialog:
+
+	    * a truck in the workshop (see PLANNABLE_STATUSES);
+	    * a truck another open trip already has (see BOOKED_TRIP_STATES) —
+	      "show me what is free" is the whole point of the list;
+	    * a Vehicle with no Capacity rated / no warehouse behind it, which
+	      cannot be planned against at all (see is_configured_truck).
+
+	`always_include` survives all three. Pass the truck the current trip is
+	already on, so it stays selectable in its own dialog even while it is
+	booked — by this trip.
 	"""
 	from thameen_erp.overrides.vehicle_stock import get_vehicle_warehouse
 
@@ -336,7 +412,7 @@ def list_vehicles_for_planning(exclude_trip=None, on_date=None, items=None):
 
 	vehicles = frappe.get_all(
 		"Vehicle",
-		filters={"custom_status": ("in", ["Available", "Assigned"])},
+		filters={"custom_status": ("in", list(PLANNABLE_STATUSES))},
 		fields=[
 			"name",
 			"custom_capacity as capacity",
@@ -344,8 +420,20 @@ def list_vehicles_for_planning(exclude_trip=None, on_date=None, items=None):
 			"custom_assigned_driver as driver",
 			"custom_status as status",
 		],
-		limit_page_length=200,
+		limit_page_length=0,
 	)
+
+	# A truck with no Capacity / no warehouse cannot be planned against.
+	vehicles = [
+		v
+		for v in vehicles
+		if v.name == always_include or is_configured_truck(v.capacity, v.warehouse)
+	]
+
+	# ... and a truck another open trip already has is not free to plan.
+	booked = vehicles_booked_on_other_trips([v.name for v in vehicles], exclude_trip=exclude_trip)
+	vehicles = [v for v in vehicles if v.name == always_include or v.name not in booked]
+
 	if not vehicles:
 		return []
 
@@ -362,7 +450,7 @@ def list_vehicles_for_planning(exclude_trip=None, on_date=None, items=None):
 		lines = by_item.get(v.warehouse) or {}
 
 		# Already carrying a cement this trip does not need: not a candidate.
-		if wanted and any(code not in wanted for code in lines):
+		if v.name != always_include and wanted and any(code not in wanted for code in lines):
 			continue
 
 		v.committed = flt(committed.get(v.name))
