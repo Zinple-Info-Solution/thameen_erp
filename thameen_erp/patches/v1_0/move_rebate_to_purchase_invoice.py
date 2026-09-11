@@ -49,13 +49,16 @@ def _migrate_rebate_doctype():
 			   WHERE (`supplier` IS NULL OR `supplier` = '')
 			     AND `customer` IS NOT NULL AND `customer` != ''"""
 		)
+		frappe.db.commit()  # commit the UPDATE before the DDL statement below
 		frappe.db.sql("ALTER TABLE `tabRebate` DROP COLUMN `customer`")
 	elif has_customer and not has_supplier:
 		# Model sync has not run yet — rename in place.
+		frappe.db.commit()  # commit any pending writes before this DDL too
 		frappe.db.sql("ALTER TABLE `tabRebate` CHANGE `customer` `supplier` varchar(140)")
 
 	frappe.db.delete("Custom Field", {"dt": "Rebate", "fieldname": "customer"})
 	frappe.clear_cache(doctype="Rebate")
+	frappe.db.commit()  # commit the Custom Field delete too, for safety
 
 
 def _flag_orphan_rebates():
@@ -90,6 +93,7 @@ def _drop_sales_rebate_fields():
 			table = f"tab{doctype}"
 			try:
 				if frappe.db.has_column(doctype, fieldname):
+					frappe.db.commit()  # commit the delete before the DDL statement
 					frappe.db.sql(f"ALTER TABLE `{table}` DROP COLUMN `{fieldname}`")
 			except Exception:
 				# A missing column is the desired end state; anything else is

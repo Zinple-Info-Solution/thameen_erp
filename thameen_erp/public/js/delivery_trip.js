@@ -878,6 +878,7 @@ function vehicle_select_html(dialog, value, cls, index) {
 	const taken = taken_vehicles(dialog, index);
 
 	// Every truck the server returned is offered, minus the ones already
+<<<<<<< HEAD
 	// picked on another row (a truck carries one load per plan), and minus
 	// trucks with nothing on them — an empty truck has nothing to check this
 	// split against. The currently selected truck is always kept, even if
@@ -885,13 +886,34 @@ function vehicle_select_html(dialog, value, cls, index) {
 	const candidates = (dialog.vehicles || []).filter(
 		(v) => v.name === value || (!taken.has(v.name) && flt(v.on_truck) > 0)
 	);
+=======
+	// picked on another row (a truck carries one load per plan). Empty trucks
+	// are included so the picker never comes up blank.
+	const candidates = (dialog.vehicles || []).filter((v) => v.name === value || !taken.has(v.name));
+>>>>>>> 5eb854dcfe42715c2c780705fe3befed3155a9e6
 
 	const opts = [`<option value="">${__("— choose later —")}</option>`]
 		.concat(
 			candidates.map((v) => {
+<<<<<<< HEAD
 				return (
 					`<option value="${frappe.utils.escape_html(v.name)}" ${v.name === value ? "selected" : ""}>` +
 					`${frappe.utils.escape_html(v.name)} · ${__("capacity")} ${format_number(v.capacity)}`
+=======
+				// Capacity and what is on the truck. Free space is deliberately
+				// not shown — it is a derived figure and dispatch reads the two
+				// raw numbers instead.
+				const holding = (v.on_truck_items || []).length
+					? (v.on_truck_items || [])
+							.map((i) => `${item_label(dialog, i.item_code)} ${format_number(i.qty)}`)
+							.join(", ")
+					: __("empty");
+				return (
+					`<option value="${frappe.utils.escape_html(v.name)}" ${v.name === value ? "selected" : ""}>` +
+					`${frappe.utils.escape_html(v.name)} · ${__("capacity")} ${format_number(v.capacity)}` +
+					` · ${__("qty")} ${format_number(v.on_truck)}` +
+					` · ${frappe.utils.escape_html(holding)}</option>`
+>>>>>>> 5eb854dcfe42715c2c780705fe3befed3155a9e6
 				);
 			})
 		)
