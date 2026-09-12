@@ -175,8 +175,8 @@ def get_truck_stock_summary(vehicle):
 def vehicle_query(doctype, txt, searchfield, start, page_len, filters):
 	"""Link-field query for Delivery Trip.vehicle.
 
-	Shows "free 120 of 300 · on truck: OPC-43 200" under each plate so the
-	dispatcher sees the stock without opening the Vehicle.
+	Shows "on truck: OPC-43 200" under each plate so the dispatcher sees the
+	stock without opening the Vehicle.
 
 	Which plates appear
 	    Every truck that is not in the workshop and is not already held by
@@ -201,7 +201,9 @@ def vehicle_query(doctype, txt, searchfield, start, page_len, filters):
 	    Computed here from Bin and the open trips, never read from the stored
 	    `custom_available_qty` cache — a hook that did not fire would
 	    otherwise offer a truck that is actually full. Pass `trip` so the trip
-	    being planned is not counted against its own truck.
+	    being planned is not counted against its own truck. Free space still
+	    drives the item-conflict/loaded logic below; it is just no longer
+	    printed in the dropdown text.
 	"""
 	from thameen_erp.overrides.vehicle_load import (
 		PLANNABLE_STATUSES,
@@ -284,28 +286,27 @@ def vehicle_query(doctype, txt, searchfield, start, page_len, filters):
 		used = max(flt(committed.get(v.name)), flt(on_hand.get(v.custom_vehicle_warehouse)))
 		free = max(capacity - used, 0.0) if capacity else 0.0
 
-		# A truck already loaded with what the trip is delivering reads as
-		# "free 0" — technically true and completely misleading, because that
-		# load is the trip. Say what it is carrying first, and describe it as
-		# ready rather than full.
+		# A truck already loaded with what the trip is delivering used to read
+		# as "free 0" — technically true and completely misleading, because
+		# that load is the trip. Say what it is carrying instead, and describe
+		# it as loaded/ready rather than full. The free/capacity numbers are
+		# no longer shown here at all — `free` above still gates which trucks
+		# qualify as "loaded" vs "on truck", it just isn't printed.
 		carrying = ", ".join(f"{code} {qty:g}" for code, qty in items)
 		if not capacity:
 			state = _("no capacity set")
 		elif items and wanted_items and free <= 0.001:
 			state = _("loaded: {0}").format(carrying)
 		elif items:
-			state = _("free {0} of {1} · on truck: {2}").format(
-				flt(free, 2), flt(capacity, 2), carrying
-			)
+			state = _("on truck: {0}").format(carrying)
 		else:
-			state = _("free {0} of {1} · empty").format(flt(free, 2), flt(capacity, 2))
+			state = _("empty")
 
 		parts = [v.custom_status or "", state]
 		out.append((v.name, " · ".join(p for p in parts if p)))
 
 	out.sort(key=lambda row: row[0])
 	return out[start : start + page_len]
-
 
 # ---------------------------------------------------------------------------
 # Manual load / unload from the Vehicle form

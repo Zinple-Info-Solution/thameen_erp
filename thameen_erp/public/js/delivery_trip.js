@@ -910,11 +910,18 @@ function vehicle_state_html(dialog, load) {
 	if (!flt(v.capacity)) return `<span class="text-danger small">${__("no capacity set")}</span>`;
 	if (!flt(v.on_truck)) return `<span class="text-muted small">${__("empty")}</span>`;
 
-	const lines = (v.on_truck_items || []).length
-		? (v.on_truck_items || [])
+	// Only show items that are actually on THIS trip — a truck may carry
+	// other cement grades from other trips, and that stock is not relevant
+	// to whether this split balances.
+	const trip_items = (v.on_truck_items || []).filter(
+		(i) => dialog.totals && Object.prototype.hasOwnProperty.call(dialog.totals, i.item_code)
+	);
+
+	const lines = trip_items.length
+		? trip_items
 				.map((i) => `${frappe.utils.escape_html(item_label(dialog, i.item_code))} <b>${format_number(i.qty)}</b>`)
 				.join("<br>")
-		: `<b>${format_number(v.on_truck)}</b>`;
+		: `<span class="text-muted small">${__("none of this trip's items")}</span>`;
 
 	return (
 		`<span class="small">${frappe.utils.escape_html(v.warehouse || load.vehicle)}<br>` +
