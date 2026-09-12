@@ -733,8 +733,9 @@ function refresh_plan(frm, dialog) {
 
 const PLAN_TOL = 0.001;
 
-// <input type="datetime-local"> needs "YYYY-MM-DDTHH:mm" and Frappe's
-// Datetime fields store "YYYY-MM-DD HH:mm:ss" — these two convert between them.
+// Two plain inputs (date, time) combined into Frappe's "YYYY-MM-DD HH:mm:ss".
+// Simpler and more consistent across browsers than a single datetime-local
+// widget, which renders very differently (and cramped) browser to browser.
 function combine_departure(date_val, time_val) {
 	if (!date_val) return "";
 	return `${date_val} ${time_val || "00:00"}:00`;
@@ -878,7 +879,6 @@ function vehicle_select_html(dialog, value, cls, index) {
 	const taken = taken_vehicles(dialog, index);
 
 	// Every truck the server returned is offered, minus the ones already
-<<<<<<< HEAD
 	// picked on another row (a truck carries one load per plan), and minus
 	// trucks with nothing on them — an empty truck has nothing to check this
 	// split against. The currently selected truck is always kept, even if
@@ -886,34 +886,13 @@ function vehicle_select_html(dialog, value, cls, index) {
 	const candidates = (dialog.vehicles || []).filter(
 		(v) => v.name === value || (!taken.has(v.name) && flt(v.on_truck) > 0)
 	);
-=======
-	// picked on another row (a truck carries one load per plan). Empty trucks
-	// are included so the picker never comes up blank.
-	const candidates = (dialog.vehicles || []).filter((v) => v.name === value || !taken.has(v.name));
->>>>>>> 5eb854dcfe42715c2c780705fe3befed3155a9e6
 
 	const opts = [`<option value="">${__("— choose later —")}</option>`]
 		.concat(
 			candidates.map((v) => {
-<<<<<<< HEAD
 				return (
 					`<option value="${frappe.utils.escape_html(v.name)}" ${v.name === value ? "selected" : ""}>` +
 					`${frappe.utils.escape_html(v.name)} · ${__("capacity")} ${format_number(v.capacity)}`
-=======
-				// Capacity and what is on the truck. Free space is deliberately
-				// not shown — it is a derived figure and dispatch reads the two
-				// raw numbers instead.
-				const holding = (v.on_truck_items || []).length
-					? (v.on_truck_items || [])
-							.map((i) => `${item_label(dialog, i.item_code)} ${format_number(i.qty)}`)
-							.join(", ")
-					: __("empty");
-				return (
-					`<option value="${frappe.utils.escape_html(v.name)}" ${v.name === value ? "selected" : ""}>` +
-					`${frappe.utils.escape_html(v.name)} · ${__("capacity")} ${format_number(v.capacity)}` +
-					` · ${__("qty")} ${format_number(v.on_truck)}` +
-					` · ${frappe.utils.escape_html(holding)}</option>`
->>>>>>> 5eb854dcfe42715c2c780705fe3befed3155a9e6
 				);
 			})
 		)
@@ -980,17 +959,20 @@ function render_plan(frm, dialog) {
 			const notes =
 				(over ? `<div class="text-danger small">${__("over by {0}", [format_number(total - free)])}</div>` : "") +
 				(load.manual ? `<div><a class="small text-muted plan-auto" data-index="${index}">${__("auto")}</a></div>` : "");
+			// Departure: two plain inputs — a date box and a time box — kept
+			// simple and consistent, rather than a single combined widget
+			// whose native styling varies a lot between browsers.
+			const departure_date = (load.departure_time || "").slice(0, 10);
+			const departure_time = (load.departure_time || "").slice(11, 16);
 			return `<tr class="${over ? "table-warning" : ""}">
 				<td>${label}</td>
 				<td>${items}</td>
 				<td>${vehicle_select_html(dialog, load.vehicle, "plan-vehicle", index)}${notes}</td>
 				<td>${vehicle_state_html(dialog, load)}</td>
 				<td>
-	<input type="date" class="form-control input-xs plan-date" data-index="${index}"
-		value="${(load.departure_time || "").slice(0, 10)}">
-	<input type="time" class="form-control input-xs plan-time mt-1" data-index="${index}"
-		value="${(load.departure_time || "").slice(11, 16)}">
-</td>
+					<input type="date" class="form-control input-xs plan-date" data-index="${index}" value="${departure_date}">
+					<input type="time" class="form-control input-xs plan-time mt-1" data-index="${index}" value="${departure_time}">
+				</td>
 			</tr>`;
 		})
 		.join("");
@@ -1104,19 +1086,19 @@ function render_plan(frm, dialog) {
 		render_plan(frm, dialog);
 	});
 	wrapper.find(".plan-date").on("change", function () {
-	const index = parseInt($(this).data("index"), 10);
-	plan[index].departure_time = combine_departure(
-		$(this).val(),
-		wrapper.find(`.plan-time[data-index="${index}"]`).val()
-	);
-});
-wrapper.find(".plan-time").on("change", function () {
-	const index = parseInt($(this).data("index"), 10);
-	plan[index].departure_time = combine_departure(
-		wrapper.find(`.plan-date[data-index="${index}"]`).val(),
-		$(this).val()
-	);
-});
+		const index = parseInt($(this).data("index"), 10);
+		plan[index].departure_time = combine_departure(
+			$(this).val(),
+			wrapper.find(`.plan-time[data-index="${index}"]`).val()
+		);
+	});
+	wrapper.find(".plan-time").on("change", function () {
+		const index = parseInt($(this).data("index"), 10);
+		plan[index].departure_time = combine_departure(
+			wrapper.find(`.plan-date[data-index="${index}"]`).val(),
+			$(this).val()
+		);
+	});
 	wrapper.find(".plan-remove").on("click", function () {
 		const index = parseInt($(this).data("index"), 10);
 		plan.splice(index, 1);
