@@ -227,16 +227,20 @@ function open_load_dialog(frm, direction) {
 		size: "large",
 		fields: [
 			{
-				fieldname: "warehouse",
-				fieldtype: "Link",
-				options: "Warehouse",
-				label: loading ? __("From Warehouse") : __("To Warehouse"),
-				reqd: 1,
-				get_query: () => ({
-					filters: { is_group: 0, company: frm.doc.custom_company, custom_is_vehicle_warehouse: 0 },
-				}),
-				onchange: () => refresh_preview(frm, dialog, direction),
-			},
+    fieldname: "warehouse",
+    fieldtype: "Link",
+    options: "Warehouse",
+    label: loading ? __("From Warehouse") : __("To Warehouse"),
+    reqd: 1,
+    get_query: () => ({
+        filters: {
+            is_group: 0,
+            company: frm.doc.custom_company,
+            name: ["!=", frm.doc.custom_vehicle_warehouse],
+        },
+    }),
+    onchange: () => refresh_preview(frm, dialog, direction),
+},
 			{ fieldtype: "Section Break" },
 			{
 				fieldname: "items",
