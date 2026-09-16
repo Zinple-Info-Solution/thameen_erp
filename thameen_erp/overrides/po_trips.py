@@ -1,30 +1,31 @@
-"""Delivery Trips planned from a Purchase Order.
+"""Delivery Trips planned from a Purchase Receipt.
 
-A Purchase Order is cement we have bought. A truck has to move it somewhere,
-and there are only two somewheres:
+Cement bought from a supplier is received into an ordinary warehouse first —
+a ordinary Purchase Receipt, same as any other purchase — so the buy is on
+the books (stock and accounts) the moment it actually arrives, not whenever a
+truck eventually happens to load it. What this module plans is the second,
+separate leg: trucking that already-received cement on to the customer it was
+bought for.
 
-    Supplier → My Warehouse   inbound. Loading receives it onto the truck,
-                              Delivered transfers it truck → yard. No customer,
-                              no Delivery Note, no POD.
-    Supplier → Customer       direct. Loading receives it onto the truck,
-                              Delivered raises the Delivery Note from the truck
-                              against the Sales Order. The yard never sees it.
+That makes it an "Own Warehouse" supply-source trip like any other — sourced
+from wherever the receipt put the stock — not "Direct from Supplier" (that
+variant receives straight onto the truck at Loading, which would double the
+receipt this module's whole point is to record early). Direct-from-Supplier
+still exists elsewhere in the app, for the opposite situation: a Sales Order
+comes up short and dispatch buys and collects in one motion — see
+`switch_to_direct_supply` in overrides.procurement.
 
-Both are "Supply Source = Direct from Supplier" trips; what differs is
-`custom_destination_type`. The yard → customer case is not planned from here —
-that is the Sales Order's job and it already works.
-
-The planner splits the order by the chosen truck's capacity: 100 bought, a
-20-capacity truck → five trips, same truck, one day apart. Every quantity,
-vehicle and date in that plan is editable before anything is created, and the
-plan can never place more than the order still has pending.
+Pending qty is scoped to ONE receipt, not the whole Purchase Order: received
+minus whatever open trips already carry `custom_purchase_receipt` = this
+receipt. A Purchase Order received in two batches gets two independent pools
+to plan against, matching the stock each batch actually put in the warehouse.
 """
 
 import json
 
 import frappe
 from frappe import _
-from frappe.utils import add_days, cint, flt, get_datetime, get_link_to_form, getdate, nowdate
+from frappe.utils import flt, get_datetime, get_link_to_form
 
 from thameen_erp.overrides.vehicle_stock import QTY_TOLERANCE
 
@@ -36,34 +37,34 @@ OPEN_TRIP_STATES = ("Draft", "Scheduled", "Loading", "In Transit")
 # ---------------------------------------------------------------------------
 
 
-def pending_po_lines(po):
-	"""Per PO line: ordered − received − already on open trips (stock UOM)."""
+def pending_receipt_lines(pr):
+	"""Per Purchase Receipt line: received − already on open trips linked to
+	THIS receipt (stock UOM). Two rows of the same item on one receipt share
+	one pool, since nothing on the receipt itself tells them apart once
+	they're in the warehouse."""
 	on_trips = {}
 	for row in frappe.db.sql(
 		"""
-		select i.po_detail,
+		select i.item_code,
 		       sum(ifnull(i.qty, 0) * ifnull(nullif(i.conversion_factor, 0), 1)) as qty
 		from `tabDelivery Trip Item` i
 		inner join `tabDelivery Trip` t on t.name = i.parent
-		where i.purchase_order = %(po)s and t.docstatus < 2
+		where t.custom_purchase_receipt = %(pr)s and t.docstatus < 2
 		  and (t.docstatus = 0 or t.status in %(states)s)
-		group by i.po_detail
+		group by i.item_code
 		""",
-		{"po": po.name, "states": OPEN_TRIP_STATES},
+		{"pr": pr.name, "states": OPEN_TRIP_STATES},
 		as_dict=True,
 	):
-		on_trips[row.po_detail] = flt(row.qty)
+		on_trips[row.item_code] = flt(row.qty)
 
-	lines = []
-	for item in po.items:
+	totals = {}
+	for item in pr.items:
 		factor = flt(item.conversion_factor) or 1
-		ordered = flt(item.qty) * factor
-		received = flt(item.received_qty) * factor
-		planned = flt(on_trips.get(item.name))
-		pending = max(ordered - received - planned, 0.0)
-		lines.append(
+		received = flt(item.qty) * factor
+		entry = totals.setdefault(
+			item.item_code,
 			{
-				"po_detail": item.name,
 				"item_code": item.item_code,
 				"item_name": item.item_name,
 				"uom": item.uom,
@@ -71,75 +72,42 @@ def pending_po_lines(po):
 				"conversion_factor": factor,
 				"rate": flt(item.rate),
 				"warehouse": item.warehouse,
-				"ordered": ordered,
-				"received": received,
-				"on_trips": planned,
-				"pending": pending if pending > QTY_TOLERANCE else 0.0,
-			}
+				"received": 0.0,
+			},
 		)
+		entry["received"] += received
+
+	lines = []
+	for item_code, entry in totals.items():
+		planned = flt(on_trips.get(item_code))
+		pending = max(entry["received"] - planned, 0.0)
+		entry["on_trips"] = planned
+		entry["pending"] = pending if pending > QTY_TOLERANCE else 0.0
+		lines.append(entry)
 	return lines
 
 
 @frappe.whitelist()
-def preview_po_trips(purchase_order):
-	po = frappe.get_doc("Purchase Order", purchase_order)
-	if po.docstatus != 1:
-		frappe.throw(_("Submit the Purchase Order before planning trips for it."))
+def preview_receipt_trips(purchase_receipt):
+	pr = frappe.get_doc("Purchase Receipt", purchase_receipt)
+	if pr.docstatus != 1:
+		frappe.throw(_("Submit the Purchase Receipt before planning trips for it."))
 
+	from thameen_erp.overrides.sales_order import _drivers_for_planning
 	from thameen_erp.overrides.vehicle_load import list_vehicles_for_planning
 
-	lines = pending_po_lines(po)
+	lines = pending_receipt_lines(pr)
 
 	return {
-		"purchase_order": po.name,
-		"supplier": po.supplier,
-		"company": po.company,
-		"schedule_date": po.schedule_date,
+		"purchase_receipt": pr.name,
+		"supplier": pr.supplier,
+		"company": pr.company,
 		"lines": lines,
 		"vehicles": list_vehicles_for_planning(
 			items=[row.get("item_code") for row in lines if row.get("item_code")]
 		),
-		"default_warehouse": po.get("set_warehouse") or (po.items[0].warehouse if po.items else None),
-		"one_item_per_trip": bool(frappe.db.get_single_value("Thameen Fleet Settings", "one_item_per_trip")),
+		"drivers": _drivers_for_planning(),
 	}
-
-
-@frappe.whitelist()
-def auto_plan(purchase_order, vehicle, start_date=None, days_between=1, use_capacity=1):
-	"""Split every pending line by one truck's capacity into dated trips.
-
-	Trip 1 gets the truck's free space (or full capacity with use_capacity),
-	the rest get full capacity each, dates stepping by `days_between`.
-	Pure suggestion — the dialog lets the dispatcher rewrite all of it.
-	"""
-	po = frappe.get_doc("Purchase Order", purchase_order)
-	cap, avail = frappe.db.get_value("Vehicle", vehicle, ["custom_capacity", "custom_available_qty"])
-	cap, avail = flt(cap), flt(avail)
-	if cap <= 0:
-		frappe.throw(_("Set a Capacity on {0} before planning by it.").format(vehicle))
-
-	date = getdate(start_date or po.schedule_date or nowdate())
-	plan = []
-	room = cap if cint(use_capacity) else avail
-	for line in pending_po_lines(po):
-		left = flt(line["pending"])
-		while left > QTY_TOLERANCE:
-			if room <= QTY_TOLERANCE:
-				room = cap
-			take = min(left, room)
-			plan.append(
-				{
-					"po_detail": line["po_detail"],
-					"item_code": line["item_code"],
-					"qty": take,
-					"vehicle": vehicle,
-					"departure_time": str(date),
-				}
-			)
-			left -= take
-			room = 0.0  # each further trip starts a fresh day
-			date = add_days(date, cint(days_between) or 1)
-	return plan
 
 
 # ---------------------------------------------------------------------------
@@ -148,27 +116,24 @@ def auto_plan(purchase_order, vehicle, start_date=None, days_between=1, use_capa
 
 
 @frappe.whitelist()
-def create_trips_from_po(
-	purchase_order,
-	destination,
-	plan,
-	target_warehouse=None,
-	sales_order=None,
-	delivery_location=None,
-	transportation_charge=None,
-):
-	"""One draft Delivery Trip per plan row.
+def create_trips_from_receipt(purchase_receipt, sales_order, plan, delivery_location=None, transportation_charge=None):
+	"""One draft Delivery Trip per plan row, sourced from an already-received
+	Purchase Receipt and sold against a Sales Order.
 
-	destination = "Own Warehouse"  → target_warehouse required
-	destination = "Customer"       → sales_order required; rows are matched to
-	                                 the order's pending lines by item.
-	plan = [{po_detail, item_code, qty (stock UOM), vehicle?, departure_time?}]
+	Always "Own Warehouse" supply source: the cement is already sitting in
+	whichever warehouse the receipt put it in, so Loading is a plain Material
+	Transfer — the same mechanism a Sales-Order-planned trip already uses —
+	not a second Purchase Receipt.
+
+	plan = [{item_code, qty (stock UOM), vehicle?, driver?, departure_time?}]
 	"""
 	frappe.has_permission("Delivery Trip", "create", throw=True)
 
-	po = frappe.get_doc("Purchase Order", purchase_order)
-	if po.docstatus != 1:
-		frappe.throw(_("Submit the Purchase Order first."))
+	pr = frappe.get_doc("Purchase Receipt", purchase_receipt)
+	if pr.docstatus != 1:
+		frappe.throw(_("Submit the Purchase Receipt first."))
+	if not sales_order:
+		frappe.throw(_("Choose the Sales Order this cement is sold against."))
 
 	if isinstance(plan, str):
 		plan = json.loads(plan or "[]")
@@ -176,83 +141,58 @@ def create_trips_from_po(
 	if not plan:
 		frappe.throw(_("Nothing to plan — every row is zero."))
 
-	if destination not in ("Own Warehouse", "Customer", "Decide After Loading"):
-		frappe.throw(_("Destination must be Own Warehouse, Customer or Decide After Loading."))
-	if destination == "Decide After Loading":
-		# Collect first, decide on the road. No warehouse, no Sales Order yet.
-		so_pool = {}
-	elif destination == "Own Warehouse":
-		if not target_warehouse:
-			frappe.throw(_("Choose the warehouse the cement is going to."))
-		if frappe.db.get_value("Warehouse", target_warehouse, "custom_is_vehicle_warehouse"):
-			frappe.throw(_("{0} is a vehicle warehouse. Choose a yard warehouse.").format(target_warehouse))
-		so_pool = {}
-	else:
-		if not sales_order:
-			frappe.throw(_("Choose the Sales Order this cement is sold against."))
-		so_pool = _sales_order_pool(sales_order)
-		delivery_location = delivery_location or frappe.db.get_value(
-			"Sales Order", sales_order, "custom_delivery_location"
-		)
+	so_pool = _sales_order_pool(sales_order)
+	delivery_location = delivery_location or frappe.db.get_value(
+		"Sales Order", sales_order, "custom_delivery_location"
+	)
+	customer = frappe.db.get_value("Sales Order", sales_order, "customer")
 
-	# Never place more than the order still has pending.
-	pending = {line["po_detail"]: line for line in pending_po_lines(po)}
+	# Never place more than this receipt actually put in the warehouse.
+	pending = {line["item_code"]: line for line in pending_receipt_lines(pr)}
 	placed = {}
 	for p in plan:
-		placed[p["po_detail"]] = flt(placed.get(p["po_detail"])) + flt(p["qty"])
-	for po_detail, qty in placed.items():
-		line = pending.get(po_detail)
+		placed[p["item_code"]] = flt(placed.get(p["item_code"])) + flt(p["qty"])
+	for item_code, qty in placed.items():
+		line = pending.get(item_code)
 		if not line:
-			frappe.throw(_("Row {0} is not on this Purchase Order.").format(po_detail))
+			frappe.throw(_("{0} is not on this Purchase Receipt.").format(item_code))
 		if qty > flt(line["pending"]) + QTY_TOLERANCE:
 			frappe.throw(
-				_("{0}: the plan places {1} but only {2} is still pending on the order "
-				  "(ordered {3}, received {4}, already on trips {5}).").format(
-					line["item_code"], flt(qty, 2), flt(line["pending"], 2),
-					flt(line["ordered"], 2), flt(line["received"], 2), flt(line["on_trips"], 2),
+				_("{0}: the plan sends {1} but only {2} of this receipt is still pending "
+				  "(received {3}, already on trips {4}).").format(
+					item_code, flt(qty, 2), flt(line["pending"], 2),
+					flt(line["received"], 2), flt(line["on_trips"], 2),
 				),
-				title=_("Plan exceeds the order"),
+				title=_("Plan exceeds the receipt"),
 			)
 
 	created = []
-	for index, p in enumerate(plan):
-		line = pending[p["po_detail"]]
+	for p in plan:
+		line = pending[p["item_code"]]
 		factor = flt(line["conversion_factor"]) or 1
-		qty_uom = flt(p["qty"]) / factor
 
 		trip = frappe.new_doc("Delivery Trip")
-		trip.company = po.company
-		trip.departure_time = _departure(p.get("departure_time"), po.schedule_date)
-		# Sites sometimes add their own mandatory fields to Delivery Trip (a
-		# plain `sales_order` link is common). Fill the ones we can; an inbound
-		# trip has no sales order at all, so form-level mandatory is skipped
-		# for it — our own validate() still runs in full.
-		if destination == "Customer" and sales_order:
-			for fieldname in ("sales_order",):
-				if trip.meta.has_field(fieldname):
-					trip.set(fieldname, sales_order)
-			if trip.meta.has_field("customer"):
-				trip.customer = frappe.db.get_value("Sales Order", sales_order, "customer")
-		else:
-			trip.flags.ignore_mandatory = True
+		trip.company = pr.company
+		trip.departure_time = _departure(p.get("departure_time"), pr.posting_date)
+		if trip.meta.has_field("sales_order"):
+			trip.sales_order = sales_order
+		if trip.meta.has_field("customer"):
+			trip.customer = customer
 		trip.custom_trip_type = "Company Vehicle"
-		trip.custom_supply_source = "Direct from Supplier"
-		trip.custom_supplier = po.supplier
-		trip.custom_purchase_order = po.name
-		trip.custom_destination_type = destination
-		trip.custom_target_warehouse = target_warehouse if destination == "Own Warehouse" else None
-		trip.custom_delivery_location = (
-			delivery_location if destination == "Customer"
-			else target_warehouse if destination == "Own Warehouse"
-			else None
-		)
-		if destination == "Customer":
-			trip.custom_sales_order = sales_order
+		trip.custom_supply_source = "Own Warehouse"
+		trip.custom_purchase_receipt = pr.name
+		trip.custom_destination_type = "Customer"
+		trip.custom_sales_order = sales_order
+		trip.custom_delivery_location = delivery_location
+		trip.custom_loading_warehouse = line["warehouse"]
 		if transportation_charge is not None and flt(transportation_charge) > 0:
 			trip.custom_transportation_charge = flt(transportation_charge)
 
 		if p.get("vehicle"):
 			trip.vehicle = p["vehicle"]
+		if p.get("driver"):
+			trip.driver = p["driver"]
+		elif p.get("vehicle"):
 			driver = frappe.db.get_value("Vehicle", p["vehicle"], "custom_assigned_driver")
 			if driver:
 				trip.driver = driver
@@ -260,52 +200,35 @@ def create_trips_from_po(
 		row = {
 			"item_code": line["item_code"],
 			"item_name": line["item_name"],
-			"qty": qty_uom,
 			"uom": line["uom"],
 			"conversion_factor": factor,
 			"stock_uom": line["stock_uom"],
-			"purchase_order": po.name,
-			"po_detail": p["po_detail"],
-			"delivery_location": trip.custom_delivery_location,
+			"source_warehouse": line["warehouse"],
+			"delivery_location": delivery_location,
 		}
 
-		if destination == "Customer":
-			so_rows = _take_from_so_pool(so_pool, line["item_code"], flt(p["qty"]), sales_order)
-			for so_row, take_stock in so_rows:
-				piece = dict(row)
-				piece.update(
-					{
-						"sales_order": sales_order,
-						"so_detail": so_row["name"],
-						"qty": take_stock / factor,
-						"rate": flt(so_row["rate"]),
-						"source_warehouse": None,
-					}
-				)
-				trip.append("custom_trip_items", piece)
-		else:
-			row["rate"] = flt(line["rate"])
-			trip.append("custom_trip_items", row)
+		so_rows = _take_from_so_pool(so_pool, line["item_code"], flt(p["qty"]), sales_order)
+		for so_row, take_stock in so_rows:
+			piece = dict(row)
+			piece.update(
+				{
+					"sales_order": sales_order,
+					"so_detail": so_row["name"],
+					"qty": take_stock / factor,
+					"rate": flt(so_row["rate"]),
+				}
+			)
+			trip.append("custom_trip_items", piece)
 
 		trip.flags.thameen_splitting = True
-		try:
-			trip.insert()
-		except frappe.MandatoryError as e:
-			if destination == "Own Warehouse" and "sales_order" in str(e):
-				frappe.throw(
-					_("Your site has made Sales Order mandatory on Delivery Trip rows (Customize Form), "
-					  "but a supplier → warehouse trip has no Sales Order. Run bench migrate to apply the "
-					  "app's property setters, or clear the mandatory tick in Customize Form → Delivery Trip Item."),
-					title=_("Site Customisation Conflict"),
-				)
-			raise
+		trip.insert()
 		created.append(trip.name)
 
 	frappe.msgprint(
-		_("{0} trip(s) planned from {1} ({2}): {3}").format(
+		_("{0} trip(s) planned from {1}, direct to {2}: {3}").format(
 			len(created),
-			get_link_to_form("Purchase Order", po.name),
-			_("to {0}").format(target_warehouse) if destination == "Own Warehouse" else _("direct to customer"),
+			get_link_to_form("Purchase Receipt", pr.name),
+			customer,
 			", ".join(get_link_to_form("Delivery Trip", name) for name in created),
 		),
 		indicator="green",
@@ -375,24 +298,30 @@ def _take_from_so_pool(pool, item_code, stock_qty, sales_order):
 
 
 @frappe.whitelist()
-def sales_orders_for_po(purchase_order):
-	"""Submitted, not-fully-delivered Sales Orders carrying any item on this PO."""
-	items = frappe.get_all("Purchase Order Item", filters={"parent": purchase_order}, pluck="item_code")
+@frappe.validate_and_sanitize_search_inputs
+def sales_orders_for_receipt(doctype, txt, searchfield, start, page_len, filters):
+	"""Link-field query for the receipt planner's Sales Order field.
+
+	Only submitted, not-fully-delivered orders carrying at least one item
+	from THIS receipt — picking the wrong order is an easy mistake when the
+	field offers every open Sales Order in the company instead.
+	"""
+	purchase_receipt = (filters or {}).get("purchase_receipt")
+	items = frappe.get_all("Purchase Receipt Item", filters={"parent": purchase_receipt}, pluck="item_code")
 	if not items:
 		return []
 	return frappe.db.sql(
 		"""
-		select distinct so.name, so.customer, so.custom_delivery_location as delivery_location,
-		       so.delivery_date, so.per_delivered
+		select distinct so.name, so.customer
 		from `tabSales Order` so
 		inner join `tabSales Order Item` soi on soi.parent = so.name
 		where so.docstatus = 1 and so.status not in ('Closed', 'Completed', 'Cancelled')
 		  and soi.item_code in %(items)s and soi.qty > soi.delivered_qty
+		  and so.name like %(txt)s
 		order by so.delivery_date
-		limit 50
+		limit %(page_len)s offset %(start)s
 		""",
-		{"items": tuple(set(items))},
-		as_dict=True,
+		{"items": tuple(set(items)), "txt": f"%{txt}%", "page_len": page_len, "start": start},
 	)
 
 

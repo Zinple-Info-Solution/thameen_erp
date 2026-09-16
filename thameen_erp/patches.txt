@@ -8,3 +8,4 @@ thameen_erp.patches.v1_0.backfill_transportation_item
 thameen_erp.patches.v1_0.backfill_trip_route
 thameen_erp.patches.v1_0.ensure_trip_time_fields
 thameen_erp.patches.v1_0.move_rebate_to_purchase_invoice
+thameen_erp.patches.v1_0.disable_auto_create_delivery_trip

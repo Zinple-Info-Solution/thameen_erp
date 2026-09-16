@@ -1,24 +1,30 @@
 // Shared trip planner table used by the Sales Order and Purchase Order dialogs.
 //
 //   thameen.trip_planner.render(dialog, {
-//       plan:      [{key, item_code, qty, vehicle, departure_time, label?}],
+//       plan:      [{key, item_code, qty, vehicle, driver, departure_time, label?}],
 //       limits:    {key: {label, max}}          max = pending qty per key
-//       vehicles:  [{name, capacity, free, on_truck}],
+//       vehicles:  [{name, capacity, free, on_truck, driver}],
+//       drivers:   [{name, full_name}],          optional — omit to hide the column's choices
 //       allow_under: true                        may plan less than max
 //   })
-//   thameen.trip_planner.collect(dialog) -> plan rows with qty > 0
+//   thameen.trip_planner.collect(dialog) -> plan rows with qty > 0, each carrying vehicle/driver/departure_time
 //
-// Two rules hold while the dialog is open. Per line, the quantities across all
-// rows never exceed what the order still owes — typing a bigger number is
-// clamped, not accepted and flagged later. And choosing a truck resizes that
-// row to the truck's FREE space, pushing what no longer fits onto the other
-// rows of the same line, or onto a fresh row when every existing one is
-// already spoken for.
+// `departure_time` is a full "YYYY-MM-DD HH:mm:ss" string throughout — the
+// Date and Time columns are two plain inputs over the same value, split and
+// rejoined by `_split_dt` on every edit.
 //
-// Free space, not rated capacity: a truck with 180 of its 300 promised to
-// other open trips has 120. Planning against 300 is how trucks get
-// double-booked. "Same truck, one day apart" deliberately reuses one plate
-// across days and is the common answer to "we only have one tanker".
+// One rule holds while the dialog is open: per line, the quantities across
+// all rows never exceed what the order still owes — typing a bigger number,
+// or picking a truck that defaults a row higher, is clamped and the excess
+// pulled back off the last sibling row of that line, not accepted silently.
+//
+// Choosing a truck defaults the row's qty to whatever of THIS item already
+// sits on that truck — dispatch is telling the trip what is really there,
+// not guessing at how much more room is free. An empty truck carries no such
+// signal and leaves the qty exactly as typed. Capacity is never used to size
+// a row automatically any more; it only ever produces the "over by" warning,
+// left for the dispatcher to resolve by hand (smaller qty, bigger truck, or
+// Split Into Trips).
 
 frappe.provide("thameen.trip_planner");
 
@@ -31,64 +37,161 @@ thameen.trip_planner._free = function (dialog, name) {
 	return flt(v.free !== undefined ? v.free : v.available);
 };
 
+// The truck's own rating, full stop — not reduced by what other trips have
+// already claimed. This is the ceiling a qty is not allowed past: a
+// 30-capacity truck takes at most 30 on THIS trip, regardless of what else
+// it is promised to elsewhere that day.
+thameen.trip_planner._capacity = function (dialog, name) {
+	const v = (dialog.planner.vehicles || []).find((x) => x.name === name);
+	if (!v || !flt(v.capacity)) return null;
+	return flt(v.capacity);
+};
+
 // Trucks already used on another row. One truck, one trip in a single plan.
+// A row typed down to zero holds no real trip any more — collect() already
+// drops it at creation time — so it must not keep its truck out of every
+// other row's dropdown for the rest of the session.
 thameen.trip_planner._taken = function (dialog, except_index) {
 	return new Set(
 		(dialog.planner.plan || [])
-			.map((p, i) => (i === except_index ? null : p.vehicle))
+			.map((p, i) => (i === except_index || flt(p.qty) <= TP_TOL ? null : p.vehicle))
 			.filter(Boolean)
 	);
 };
 
-// Choosing a truck sizes that row to the space it has. Everything still
-// unplaced on that line collapses onto ONE row — the first without a truck —
-// so the tail shrinks and disappears as trucks are assigned, instead of
-// splitting into fractions across rows nobody has picked yet.
-thameen.trip_planner._fit_row = function (dialog, index) {
+// Same rule for drivers: one driver cannot be on two trips in one plan.
+thameen.trip_planner._taken_drivers = function (dialog, except_index) {
+	return new Set(
+		(dialog.planner.plan || [])
+			.map((p, i) => (i === except_index || flt(p.qty) <= TP_TOL ? null : p.driver))
+			.filter(Boolean)
+	);
+};
+
+// "YYYY-MM-DD HH:mm:ss" / ISO -> the {date, time} pair the two plain inputs
+// need. Missing or unparsable time falls back to a sensible default so a
+// row created before a date was picked does not render an empty clock.
+thameen.trip_planner._split_dt = function (value) {
+	const s = String(value || "").replace("T", " ");
+	const date = s.slice(0, 10);
+	const time = /^\d{2}:\d{2}/.test(s.slice(11, 16)) ? s.slice(11, 16) : "09:00";
+	return { date, time };
+};
+
+// What of THIS item already sits on this truck, or null if the truck carries
+// none of it (empty, or loaded with something else entirely — the picker
+// already keeps a conflicting truck out of the list).
+thameen.trip_planner._qty_on_vehicle = function (dialog, vehicle, item_code) {
+	const v = (dialog.planner.vehicles || []).find((x) => x.name === vehicle);
+	if (!v || !item_code) return null;
+	const row = (v.on_truck_items || []).find((it) => it.item_code === item_code);
+	return row ? flt(row.qty) : null;
+};
+
+// Picking a vehicle caps the row at what this truck can actually take. Two
+// independent ceilings apply, and whichever is smaller wins:
+//
+//   - capacity (the truck's own rating): a hard physical limit, checked even
+//     on an EMPTY truck — a 30-capacity truck cannot be handed a 40-qty row
+//     just because it has nothing on it yet to contradict that. This is the
+//     flat rating, not shrunk by what other trips already have promised —
+//     one trip is bounded by what the truck can carry, full stop.
+//   - what of this item is already on the truck: a soft, informational
+//     default (there is more room, but that is not what is actually loaded)
+//     that only ever pulls a qty already above it down to it — it never
+//     raises a row, and never applies at all to an empty truck, which has no
+//     such number to offer.
+//
+// Either way, whatever this truck cannot cover does not vanish and does not
+// get folded into some other row silently — it opens a fresh row on the same
+// line with no truck chosen yet, so the dispatcher picks a second vehicle
+// for exactly what the first one could not take.
+thameen.trip_planner._set_qty_from_vehicle = function (dialog, index) {
 	const o = dialog.planner;
-	const row = o.plan[index];
-	const free = thameen.trip_planner._free(dialog, row.vehicle);
-	if (free === null) return;
+	const plan = o.plan;
+	const row = plan[index];
+	const before = flt(row.qty);
 
-	const line = o.plan.filter((p) => p.key === row.key);
-	const line_total = line.reduce((sum, p) => sum + flt(p.qty), 0);
+	const capacity = thameen.trip_planner._capacity(dialog, row.vehicle);
+	const on_vehicle = thameen.trip_planner._qty_on_vehicle(dialog, row.vehicle, row.item_code);
 
-	let left = line_total;
-	// Rows with a truck take what that truck holds, in the order they appear.
-	o.plan.forEach((p) => {
-		if (p.key !== row.key) return;
-		const p_free = thameen.trip_planner._free(dialog, p.vehicle);
-		if (p_free === null) {
-			p.qty = 0;
-			return;
-		}
-		p.qty = Math.max(Math.min(p_free, left), 0);
-		left -= p.qty;
-	});
+	let target = before;
+	if (capacity !== null) target = Math.min(target, capacity);
+	if (on_vehicle !== null) target = Math.min(target, on_vehicle);
 
-	if (left > TP_TOL) {
-		const spare = o.plan.find(
-			(p) => p.key === row.key && thameen.trip_planner._free(dialog, p.vehicle) === null
-		);
-		if (spare) {
-			spare.qty = left;
-		} else {
-			o.plan.push({
-				...row,
-				qty: left,
-				vehicle: null,
-				departure_time: frappe.datetime.add_days(
-					row.departure_time || frappe.datetime.get_today(),
-					1
-				),
-			});
+	if (target + TP_TOL >= before) return;
+
+	const short = before - target;
+	row.qty = target;
+
+	// Reuse a sibling row that has no truck yet, so re-picking a vehicle on
+	// the same line does not keep spawning empty rows.
+	const spare = plan.find((p, j) => j !== index && p.key === row.key && !p.vehicle);
+	if (spare) {
+		spare.qty = flt(spare.qty) + short;
+	} else {
+		plan.push({ ...row, vehicle: null, driver: null, driver_manual: false, qty: short });
+	}
+};
+
+// The one place a row's qty is written from anywhere but the qty input
+// itself. Two ceilings apply, and they are handled differently on purpose:
+//
+//   - Capacity: a truck cannot be typed past what it can physically hold.
+//     What that clamp removes is still qty the ORDER needs — nothing about
+//     the line changed — so it does not vanish: it opens a fresh row (or
+//     feeds one already waiting for a truck), same as picking a truck with
+//     too little room does in `_set_qty_from_vehicle`.
+//   - The line's own total: never claim more of a line than the order still
+//     owes. A sibling row absorbs the difference either way (gives up space
+//     when this row grows, picks up the remainder when it shrinks) — that
+//     sibling's own current qty is excluded from the ceiling, not counted
+//     against it, so typing 20 into a row that only had 15 because a sibling
+//     is sitting on the other 85 of a 100 line still reaches 20, pulling the
+//     5 it needs straight off that sibling in the same edit.
+thameen.trip_planner._apply_qty = function (dialog, index, new_qty) {
+	const o = dialog.planner;
+	const plan = o.plan;
+	const row = plan[index];
+	const key = row.key;
+
+	const capacity = thameen.trip_planner._capacity(dialog, row.vehicle);
+	let requested = Math.max(flt(new_qty), 0);
+	let overflow = 0;
+	if (capacity !== null && requested > capacity + TP_TOL) {
+		overflow = requested - capacity;
+		requested = capacity;
+	}
+
+	let sibling = -1;
+	for (let j = plan.length - 1; j >= 0; j--) {
+		if (j !== index && plan[j].key === key) {
+			sibling = j;
+			break;
 		}
 	}
 
-	// Rows left at zero are noise, unless a line would end up with none at all.
-	o.plan = o.plan.filter(
-		(p) => flt(p.qty) > TP_TOL || o.plan.filter((q) => q.key === p.key).length === 1
+	const fixed_elsewhere = plan.reduce(
+		(sum, p, j) => (j !== index && j !== sibling && p.key === key ? sum + flt(p.qty) : sum),
+		0
 	);
+	const ceiling = flt((o.limits[key] || {}).max) - fixed_elsewhere;
+
+	const nq = Math.min(requested, Math.max(ceiling, 0));
+	const diff = nq - flt(row.qty);
+	row.qty = nq;
+	if (sibling >= 0) {
+		plan[sibling].qty = Math.max(flt(plan[sibling].qty) - diff, 0);
+	}
+
+	if (overflow > TP_TOL) {
+		const spare = plan.find((p, j) => j !== index && p.key === key && !p.vehicle);
+		if (spare) {
+			spare.qty = flt(spare.qty) + overflow;
+		} else {
+			plan.push({ ...row, vehicle: null, driver: null, driver_manual: false, qty: overflow });
+		}
+	}
 };
 
 thameen.trip_planner.render = function (dialog, opts) {
@@ -104,6 +207,7 @@ thameen.trip_planner.collect = function (dialog) {
 			item_code: p.item_code,
 			qty: flt(p.qty),
 			vehicle: p.vehicle || null,
+			driver: p.driver || null,
 			departure_time: p.departure_time || null,
 			...(p.extra || {}),
 		}));
@@ -144,7 +248,7 @@ thameen.trip_planner.auto_split = function (dialog, vehicle, start_date, days_be
 		let left = totals[key];
 		while (left > 0.001) {
 			const take = Math.min(left, per_trip);
-			out.push({ ...template[key], qty: take, vehicle, departure_time: date });
+			out.push({ ...template[key], qty: take, vehicle, driver: v.driver || null, departure_time: date });
 			left -= take;
 			date = frappe.datetime.add_days(date, days_between || 1);
 		}
@@ -157,35 +261,87 @@ thameen.trip_planner._draw = function (dialog) {
 	const o = dialog.planner;
 	const wrapper = dialog.fields_dict.plan.$wrapper;
 	const plan = o.plan;
-	const vehicle_opts = (value, index) => {
+	// What a truck's dropdown entry says about its load: while browsing
+	// options, one number only — the qty of THIS item already on the truck
+	// (the same number the qty column gets capped to on selection). Capacity
+	// only stands in for that when there is nothing on the truck to quote —
+	// an empty truck has no qty of its own yet. The fuller picture (both
+	// capacity AND qty together) shows up once a truck is actually chosen,
+	// in the Available stock column.
+	const vehicle_remaining_label = (v, item_code) => {
+		if (v.is_empty) {
+			return flt(v.capacity)
+				? `${__("empty")} · ${__("cap")} ${format_number(v.capacity)}`
+				: __("no capacity set");
+		}
+		const on_item = (v.on_truck_items || []).find((it) => it.item_code === item_code);
+		const qty = on_item ? flt(on_item.qty) : flt(v.on_truck);
+		return format_number(qty);
+	};
+
+	const vehicle_opts = (value, index, item_code) => {
 		const taken = thameen.trip_planner._taken(dialog, index);
 		return [`<option value="">${__("— choose later —")}</option>`]
 			.concat(
 				o.vehicles
 					.filter((v) => v.name === value || !taken.has(v.name))
-					.map((v) => {
-						const free = flt(v.free !== undefined ? v.free : v.available);
-						return (
+					// A truck already carrying a different cement is not a
+					// candidate for this line — empty trucks take anything.
+					.filter(
+						(v) =>
+							v.name === value ||
+							!item_code ||
+							v.is_empty ||
+							(v.on_truck_items || []).some((it) => it.item_code === item_code)
+					)
+					.map(
+						(v) =>
 							`<option value="${frappe.utils.escape_html(v.name)}" ${v.name === value ? "selected" : ""}>` +
-							`${frappe.utils.escape_html(v.name)} · ${__("cap")} ${format_number(v.capacity)} · ${__("free")} ${format_number(free)}</option>`
-						);
-					})
+							`${frappe.utils.escape_html(v.name)} · ${vehicle_remaining_label(v, item_code)}</option>`
+					)
 			)
 			.join("");
 	};
 
-	// What the chosen truck is physically carrying, named by its warehouse.
-	// The free-space figures are already on every option in the dropdown to
-	// the left, so repeating them here was the same numbers twice on one row.
+	// Named drivers come from `o.drivers` (the Sales Order dialog supplies the
+	// full active roster). Callers that only pass vehicles — the Purchase
+	// Order dialog today — still get each truck's own driver as an option, so
+	// a row auto-filled from its vehicle shows a real selection instead of
+	// looking like nothing was picked.
+	const driver_opts = (value, index) => {
+		const taken = thameen.trip_planner._taken_drivers(dialog, index);
+		const known = new Map((o.drivers || []).map((d) => [d.name, d.full_name || d.name]));
+		(o.vehicles || []).forEach((v) => {
+			if (v.driver && !known.has(v.driver)) known.set(v.driver, v.driver);
+		});
+		if (value && !known.has(value)) known.set(value, value);
+		return [`<option value="">${__("— choose later —")}</option>`]
+			.concat(
+				Array.from(known.entries())
+					.filter(([name]) => name === value || !taken.has(name))
+					.map(
+						([name, label]) =>
+							`<option value="${frappe.utils.escape_html(name)}" ${name === value ? "selected" : ""}>` +
+							`${frappe.utils.escape_html(label)}</option>`
+					)
+			)
+			.join("");
+	};
+
+	// Once a truck is actually chosen, spell out both numbers together — what
+	// it is rated for and what of THIS item is really on it — instead of the
+	// single figure the dropdown makes do with while still browsing options.
 	const truck_state = (p) => {
 		if (!p.vehicle) return `<span class="text-muted">—</span>`;
 		const v = o.vehicles.find((x) => x.name === p.vehicle);
 		if (!v) return `<span class="text-muted">—</span>`;
 		if (!flt(v.capacity)) return `<span class="text-danger">${__("no capacity set")}</span>`;
-		if (!flt(v.on_truck)) return `<span class="text-muted small">${__("empty")}</span>`;
+		const on_item = (v.on_truck_items || []).find((it) => it.item_code === p.item_code);
+		const qty = on_item ? flt(on_item.qty) : 0;
+		const available = qty > 0 ? format_number(qty) : `<span class="text-muted">${__("empty")}</span>`;
 		return (
-			`<span class="small">${frappe.utils.escape_html(v.warehouse || p.vehicle)} ` +
-			`<b>${format_number(v.on_truck)}</b></span>`
+			`<span class="small">${__("cap")} <b>${format_number(v.capacity)}</b> · ` +
+			`${__("available")} <b>${available}</b></span>`
 		);
 	};
 
@@ -195,14 +351,17 @@ thameen.trip_planner._draw = function (dialog) {
 			// its 300 already promised elsewhere has 120, not 300.
 			const free = thameen.trip_planner._free(dialog, p.vehicle);
 			const over = free !== null && flt(p.qty) > free + TP_TOL;
+			const { date, time } = thameen.trip_planner._split_dt(p.departure_time);
 			return `<tr class="${over ? "table-warning" : ""}">
 				<td>${i + 1}</td>
 				<td>${frappe.utils.escape_html(p.label || p.item_code)}</td>
 				<td><input type="text" inputmode="decimal" class="form-control input-xs tp-qty no-spin" data-i="${i}" value="${p.qty}" style="width:110px">
 					${over ? `<div class="text-danger small">${__("over by {0}", [format_number(flt(p.qty) - free)])}</div>` : ""}</td>
-				<td><select class="form-control input-xs tp-vehicle" data-i="${i}">${vehicle_opts(p.vehicle, i)}</select></td>
+				<td><select class="form-control input-xs tp-vehicle" data-i="${i}">${vehicle_opts(p.vehicle, i, p.item_code)}</select></td>
 				<td>${truck_state(p)}</td>
-				<td><input type="date" class="form-control input-xs tp-date" data-i="${i}" value="${(p.departure_time || "").slice(0, 10)}"></td>
+				<td><select class="form-control input-xs tp-driver" data-i="${i}">${driver_opts(p.driver, i)}</select></td>
+				<td><input type="date" class="form-control input-xs tp-date" data-i="${i}" value="${date}" style="width:120px"></td>
+				<td><input type="time" class="form-control input-xs tp-time" data-i="${i}" value="${time}" style="width:90px"></td>
 				<td><a class="text-danger small tp-remove" data-i="${i}">${__("remove")}</a></td>
 			</tr>`;
 		})
@@ -233,9 +392,10 @@ thameen.trip_planner._draw = function (dialog) {
 		</div>
 		<table class="table table-bordered small">
 			<thead><tr>
-				<th style="width:5%">#</th><th style="width:20%">${__("Line")}</th><th style="width:14%">${__("Qty")}</th>
-				<th>${__("Vehicle")}</th><th style="width:16%">${__("Available stock")}</th>
-				<th style="width:14%">${__("Departure")}</th><th style="width:7%"></th>
+				<th style="width:4%">#</th><th style="width:16%">${__("Line")}</th><th style="width:10%">${__("Qty")}</th>
+				<th>${__("Vehicle")}</th><th style="width:12%">${__("Available stock")}</th>
+				<th>${__("Driver")}</th>
+				<th style="width:11%">${__("Date")}</th><th style="width:9%">${__("Time")}</th><th style="width:6%"></th>
 			</tr></thead>
 			<tbody>${rows}</tbody>
 		</table>
@@ -245,31 +405,39 @@ thameen.trip_planner._draw = function (dialog) {
 
 	wrapper.find(".tp-qty").on("change", function () {
 		const i = parseInt($(this).data("i"), 10);
-		// Never let a row take more of a line than the order still owes.
-		const elsewhere = plan.reduce(
-			(sum, p, j) => (j !== i && p.key === plan[i].key ? sum + flt(p.qty) : sum),
-			0
-		);
-		const ceiling = flt((o.limits[plan[i].key] || {}).max) - elsewhere;
-		const nq = Math.min(Math.max(flt($(this).val()), 0), Math.max(ceiling, 0));
-		const diff = nq - flt(plan[i].qty);
-		plan[i].qty = nq;
-		for (let j = plan.length - 1; j >= 0; j--) {
-			if (j !== i && plan[j].key === plan[i].key) {
-				plan[j].qty = Math.max(flt(plan[j].qty) - diff, 0);
-				break;
-			}
-		}
+		thameen.trip_planner._apply_qty(dialog, i, $(this).val());
 		thameen.trip_planner._draw(dialog);
 	});
 	wrapper.find(".tp-vehicle").on("change", function () {
 		const i = parseInt($(this).data("i"), 10);
 		plan[i].vehicle = $(this).val() || null;
-		thameen.trip_planner._fit_row(dialog, i);
+		// Default the row to this truck's usual driver, unless the dispatcher
+		// already picked one by hand — a manual pick survives a truck change.
+		if (!plan[i].driver_manual) {
+			const v = (o.vehicles || []).find((x) => x.name === plan[i].vehicle);
+			plan[i].driver = (v && v.driver) || null;
+		}
+		// Cap the qty to what this item already sits on the truck — not to
+		// free capacity — and split off a new row for whatever this truck
+		// cannot cover.
+		thameen.trip_planner._set_qty_from_vehicle(dialog, i);
+		thameen.trip_planner._draw(dialog);
+	});
+	wrapper.find(".tp-driver").on("change", function () {
+		const i = parseInt($(this).data("i"), 10);
+		plan[i].driver = $(this).val() || null;
+		plan[i].driver_manual = true;
 		thameen.trip_planner._draw(dialog);
 	});
 	wrapper.find(".tp-date").on("change", function () {
-		plan[parseInt($(this).data("i"), 10)].departure_time = $(this).val();
+		const i = parseInt($(this).data("i"), 10);
+		const time = thameen.trip_planner._split_dt(plan[i].departure_time).time;
+		plan[i].departure_time = `${$(this).val()} ${time}:00`;
+	});
+	wrapper.find(".tp-time").on("change", function () {
+		const i = parseInt($(this).data("i"), 10);
+		const date = thameen.trip_planner._split_dt(plan[i].departure_time).date || frappe.datetime.get_today();
+		plan[i].departure_time = `${date} ${$(this).val()}:00`;
 	});
 	wrapper.find(".tp-remove").on("click", function () {
 		const i = parseInt($(this).data("i"), 10);
@@ -290,11 +458,20 @@ thameen.trip_planner._draw = function (dialog) {
 			frappe.msgprint(__("Choose a truck first."));
 			return;
 		}
-		const base = (o.start_date && o.start_date()) || frappe.datetime.get_today();
+		// No shared date field to fall back on any more — start from whatever
+		// date is already sitting on the first row (itself just an ordinary,
+		// independently editable Date input, same as every other row's).
+		const base =
+			(o.start_date && o.start_date()) ||
+			thameen.trip_planner._split_dt(plan[0] && plan[0].departure_time).date ||
+			frappe.datetime.get_today();
 		const step = (o.days_between && o.days_between()) || 1;
+		const vv = (o.vehicles || []).find((x) => x.name === v);
 		plan.forEach((p, i) => {
 			p.vehicle = v;
-			p.departure_time = frappe.datetime.add_days(base, i * step);
+			if (!p.driver_manual) p.driver = (vv && vv.driver) || null;
+			const time = thameen.trip_planner._split_dt(p.departure_time).time;
+			p.departure_time = `${frappe.datetime.add_days(base, i * step)} ${time}:00`;
 		});
 		thameen.trip_planner._draw(dialog);
 	});

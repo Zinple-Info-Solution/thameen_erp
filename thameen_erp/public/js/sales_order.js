@@ -1,7 +1,12 @@
 frappe.ui.form.on("Sales Order", {
 	refresh(frm) {
-		if (frm.doc.docstatus !== 1) return;
 		if (["Closed", "Cancelled"].includes(frm.doc.status)) return;
+
+		// Raised regardless of docstatus — a promise the yard cannot keep is
+		// worth flagging while the order is still a draft, not just after.
+		check_stock_coverage(frm);
+
+		if (frm.doc.docstatus !== 1) return;
 
 		frm.add_custom_button(
 			__("Delivery Trips"),
@@ -12,6 +17,39 @@ frappe.ui.form.on("Sales Order", {
 		show_trip_summary(frm);
 	},
 });
+
+// Company-wide stock against what this order still owes, checked the moment
+// the order is opened — catching a shortfall here is far cheaper than
+// catching it when a Delivery Trip refuses to submit later.
+function check_stock_coverage(frm) {
+	if (frm.is_new() || !(frm.doc.items || []).length) return;
+
+	frappe.call({
+		method: "thameen_erp.overrides.sales_order.check_stock_coverage",
+		args: { sales_order: frm.doc.name },
+		callback({ message }) {
+			if (!message || !message.short || !message.short.length) return;
+
+			const lines = message.short
+				.map((r) =>
+					__("{0}: needs {1}, only {2} available company-wide ({3} short)", [
+						frappe.utils.escape_html(r.item_name),
+						format_number(r.needed),
+						format_number(r.available),
+						format_number(r.short),
+					])
+				)
+				.join("<br>");
+
+			frm.dashboard.set_headline_alert(
+				`<div class="row"><div class="col-sm-12">` +
+					`<b>${__("Not enough stock company-wide to fully deliver this order")}</b><br>${lines}` +
+					`</div></div>`,
+				"red"
+			);
+		},
+	});
+}
 
 function plan_trips(frm) {
 	frappe.call({
@@ -29,33 +67,17 @@ function plan_trips(frm) {
 	});
 }
 
-// Sales Order case: one trip per site and item to start with; pick a truck to
-// split by its capacity into dated trips, then edit anything before creating.
+// Sales Order case: one trip per site AND per item to start with — two
+// different items never share a row, each gets its own line with its own
+// vehicle picker. Qty, vehicle, driver and date/time are all set per row in
+// the table below — nothing is left outside it any more. "Same truck for
+// all, one day apart" works off whatever date is already on the first row,
+// stepping one day at a time.
 function open_so_planner(frm, data) {
 	const dialog = new frappe.ui.Dialog({
 		title: __("Plan Delivery Trips from {0}", [frm.doc.name]),
 		size: "extra-large",
-		fields: [
-			{
-				fieldname: "vehicle", fieldtype: "Link", options: "Vehicle", label: __("Plan by truck"),
-				description: __("Splits every line by this truck's capacity, one trip per day. Edit afterwards."),
-				// No status filter: the server offers every truck that is not
-				// in the workshop and not already held by another open trip.
-				get_query: () => ({
-					query: "thameen_erp.overrides.vehicle_stock.vehicle_query",
-					filters: {},
-				}),
-				onchange: () => {
-					const v = dialog.get_value("vehicle");
-					if (v) thameen.trip_planner.auto_split(dialog, v, dialog.get_value("start_date"), dialog.get_value("days_between") || 1);
-				},
-			},
-			{ fieldtype: "Column Break" },
-			{ fieldname: "start_date", fieldtype: "Date", label: __("First trip on"), default: (data.departure_time || "").slice(0, 10) || frappe.datetime.get_today() },
-			{ fieldname: "days_between", fieldtype: "Int", label: __("Days between trips"), default: 1 },
-			{ fieldtype: "Section Break" },
-			{ fieldtype: "HTML", fieldname: "plan" },
-		],
+		fields: [{ fieldtype: "HTML", fieldname: "plan" }],
 		primary_action_label: __("Create Trips"),
 		primary_action() {
 			const plan = thameen.trip_planner.collect(dialog);
@@ -83,18 +105,18 @@ function open_so_planner(frm, data) {
 		const key = `${p.delivery_location || ""}::${p.item_code}`;
 		limits[key] = { label: `${p.item_code} @ ${p.delivery_location || __("(order default)")}`, max: flt(p.qty) };
 		return {
-			key, item_code: p.item_code, qty: flt(p.qty), vehicle: null,
+			key, item_code: p.item_code, qty: flt(p.qty), vehicle: null, driver: null,
 			label: `${p.item_code} → ${p.delivery_location || __("(order default)")}`,
-			departure_time: (data.departure_time || "").slice(0, 10) || frappe.datetime.get_today(),
+			departure_time: data.departure_time || frappe.datetime.get_today(),
 			extra: { delivery_location: p.delivery_location || null },
 		};
 	});
 	dialog.show();
 	thameen.trip_planner.render(dialog, {
-		plan, limits, vehicles: data.vehicles || [], allow_under: true,
-		same_truck: () => dialog.get_value("vehicle"),
-		start_date: () => dialog.get_value("start_date"),
-		days_between: () => dialog.get_value("days_between"),
+		// No dialog-level vehicle, date or days-between field any more —
+		// "Same truck for all" falls back to whichever vehicle and date are
+		// already on the first row of the table, stepping one day at a time.
+		plan, limits, vehicles: data.vehicles || [], drivers: data.drivers || [], allow_under: true,
 	});
 }
 

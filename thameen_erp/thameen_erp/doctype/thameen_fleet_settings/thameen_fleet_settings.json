@@ -69,8 +69,8 @@
    "fieldname": "auto_create_delivery_trip",
    "fieldtype": "Check",
    "label": "Auto-create Delivery Trips on Sales Order submit",
-   "default": "1",
-   "description": "One draft trip per delivery location, containing every pending line for that site. Vehicle and driver are assigned by dispatch."
+   "default": "0",
+   "description": "Off by default: dispatch plans trips with the 'Create > Delivery Trips' button on the submitted order instead, choosing vehicle, driver and date/time there. Turn this on only if trips should be drafted automatically with no vehicle or driver assigned."
   },
   {
    "fieldname": "auto_close_sales_order",

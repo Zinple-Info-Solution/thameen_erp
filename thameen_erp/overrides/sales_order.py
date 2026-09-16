@@ -132,6 +132,75 @@ def get_pending_items(sales_order):
 	return so, pending
 
 
+@frappe.whitelist()
+def check_stock_coverage(sales_order):
+	"""Company-wide YARD stock against what this order still owes, per item.
+
+	"Pending" is the same measure the trip planner itself uses — ordered
+	minus delivered minus whatever an open trip has already claimed — so a
+	partially-dispatched order is not flagged as short on qty that has
+	already gone out. Stock is summed across every ordinary warehouse
+	belonging to the order's company, not just the item's default warehouse,
+	since cement sitting in a different yard still covers the order.
+
+	Vehicle warehouses are excluded, same as every other yard-stock query in
+	this app (see `_vehicle_warehouse_or_loading`, `_set_loading_warehouse`):
+	cement already loaded onto a truck for a different trip is not free stock
+	this order can also claim, so counting it here would hide a real
+	shortfall behind someone else's load.
+
+	This is a heads-up for sales, raised the moment the order is opened —
+	catching a promise the yard cannot keep here is far cheaper than catching
+	it when a Delivery Trip is blocked from submitting later. It only ever
+	looks at THIS order in isolation, so two open orders both drawing on the
+	same limited stock can each show as covered — the same simplification
+	`get_pending_items` already makes for a single order's own open trips.
+	"""
+	so, pending = get_pending_items(sales_order)
+	if not pending:
+		return {"short": []}
+
+	needed = {}
+	item_names = {}
+	for row in pending:
+		needed[row.item_code] = flt(needed.get(row.item_code)) + flt(row.qty) * (flt(row.conversion_factor) or 1)
+		item_names[row.item_code] = row.item_name
+
+	stock = {}
+	if needed:
+		for row in frappe.db.sql(
+			"""
+			select b.item_code, sum(b.actual_qty) as qty
+			from `tabBin` b
+			inner join `tabWarehouse` w on w.name = b.warehouse
+			where w.company = %(company)s
+			  and ifnull(w.custom_is_vehicle_warehouse, 0) = 0
+			  and b.item_code in %(items)s
+			group by b.item_code
+			""",
+			{"company": so.company, "items": tuple(needed.keys())},
+			as_dict=True,
+		):
+			stock[row.item_code] = flt(row.qty)
+
+	short = []
+	for item_code, qty_needed in needed.items():
+		available = flt(stock.get(item_code))
+		shortfall = qty_needed - available
+		if shortfall > 0.001:
+			short.append(
+				{
+					"item_code": item_code,
+					"item_name": item_names.get(item_code) or item_code,
+					"needed": qty_needed,
+					"available": available,
+					"short": shortfall,
+				}
+			)
+
+	return {"short": short}
+
+
 def group_by_location(pending):
 	"""One group per delivery location — and, when One Item per Trip is on in
 	Thameen Fleet Settings, per item within that location.
@@ -158,13 +227,36 @@ def _location_from_key(key):
 	return None if location == NO_LOCATION else location
 
 
+def _drivers_for_planning():
+	"""Active drivers for the trip-planner dialog, with their usual truck so
+	the dialog can default a row's driver the moment its vehicle is chosen.
+
+	A driver already on another trip that is Scheduled, Loading or In Transit
+	is out driving it — same rule the vehicle picker already applies to
+	trucks — so they are left off the list rather than offered and double-
+	booked.
+	"""
+	from thameen_erp.overrides.vehicle_load import drivers_booked_on_other_trips
+
+	drivers = frappe.get_all(
+		"Driver",
+		filters={"status": "Active"},
+		fields=["name", "full_name", "custom_assigned_vehicle as vehicle"],
+		order_by="full_name",
+		limit_page_length=0,
+	)
+	booked = drivers_booked_on_other_trips([d.name for d in drivers])
+	return [d for d in drivers if d.name not in booked]
+
+
 @frappe.whitelist()
 def preview_trip_plan(sales_order):
 	"""What the planner would create — used by the Sales Order dialog.
 
 	Returns one entry per (location, item) with the qty in STOCK UOM, the
-	vehicles available for planning and the default departure, so the dialog
-	can let the dispatcher edit qty / truck / date before creating anything.
+	vehicles and drivers available for planning and the default departure, so
+	the dialog can let the dispatcher edit qty / truck / driver / date & time
+	before creating anything.
 	"""
 	so, pending = get_pending_items(sales_order)
 	groups = group_by_location(pending)
@@ -193,6 +285,7 @@ def preview_trip_plan(sales_order):
 		"vehicles": list_vehicles_for_planning(
 			items=[row["item_code"] for row in plan if row.get("item_code")]
 		),
+		"drivers": _drivers_for_planning(),
 		"departure_time": str(_default_departure(so)),
 	}
 
@@ -201,7 +294,10 @@ def preview_trip_plan(sales_order):
 def make_delivery_trips_from_plan(sales_order, plan):
 	"""Create trips exactly as the dispatcher planned them in the dialog.
 
-	plan = [{delivery_location, item_code, qty (stock UOM), vehicle?, departure_time?}]
+	plan = [{delivery_location, item_code, qty (stock UOM), vehicle?, driver?, departure_time?}]
+	`driver` overrides the vehicle's own assigned driver — a dispatcher
+	splitting one truck's driver duty across trips, or standing in for someone
+	on leave, picks the driver explicitly instead of getting the truck's default.
 	Each entry becomes one draft trip; its qty is cut out of the order's
 	pending rows for that location and item, first-come-first-served, so the
 	Sales Order line references are kept. Planning more than is pending is
@@ -253,6 +349,9 @@ def make_delivery_trips_from_plan(sales_order, plan):
 		_fill_site_fields(trip, so)
 		if p.get("vehicle"):
 			trip.vehicle = p["vehicle"]
+		if p.get("driver"):
+			trip.driver = p["driver"]
+		elif p.get("vehicle"):
 			driver = frappe.db.get_value("Vehicle", p["vehicle"], "custom_assigned_driver")
 			if driver:
 				trip.driver = driver

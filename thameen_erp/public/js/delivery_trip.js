@@ -172,6 +172,41 @@ frappe.ui.form.on("Delivery Trip", {
 		const { custom_starting_odometer: s, custom_ending_odometer: e } = frm.doc;
 		if (s && e && e >= s) frm.set_value("total_distance", e - s);
 	},
+
+	// The server already refuses to submit a trip the yard cannot fill (see
+	// _validate_stock_available) — but that only ever surfaces as a plain
+	// error after the dispatcher has already clicked Submit. Check first and,
+	// if short, open the same procurement dialog Check Stock uses, so the
+	// fix is one click away instead of a second trip back to this form.
+	// Returning a Promise here makes Frappe wait for it before deciding
+	// whether the submit actually proceeds (see script_manager.trigger).
+	before_submit(frm) {
+		if (frm.doc.custom_supply_source === "Direct from Supplier") return;
+		if (!(frm.doc.custom_trip_items || []).length) return;
+
+		return new Promise((resolve) => {
+			frappe.call({
+				method: "thameen_erp.overrides.procurement.check_trip_stock",
+				args: { trip: frm.doc.name, vehicle: frm.doc.vehicle },
+				freeze: true,
+				freeze_message: __("Checking stock…"),
+				callback({ message }) {
+					if (!message || message.sufficient) {
+						resolve();
+						return;
+					}
+					offer_procurement(frm, message, {
+						allow_submit_anyway: true,
+						on_settle: (proceeded) => {
+							if (!proceeded) frappe.validated = false;
+							resolve();
+						},
+					});
+				},
+				error: () => resolve(),
+			});
+		});
+	},
 });
 
 frappe.ui.form.on("Delivery Trip Item", {
@@ -356,12 +391,71 @@ function add_status_buttons(frm) {
 			return;
 		}
 
+		// Loading is the one transition that actually moves stock — show what
+		// that move looks like (truck vs warehouse, item by item) instead of a
+		// plain yes/no, so a shortfall is visible before it is committed to.
+		if (next === "Loading" && frm.doc.custom_supply_source !== "Direct from Supplier") {
+			confirm_loading(frm, advance);
+			return;
+		}
+
 		if (STAGE_HINT[next]) {
 			frappe.confirm(STAGE_HINT[next] + "<br><br>" + __("Continue?"), advance);
 		} else {
 			advance();
 		}
 	});
+}
+
+// Loading pulls from two places at once — whatever is already sitting in the
+// vehicle's own warehouse (nothing to move) and the loading warehouse (a
+// Material Transfer for the rest). Show both, with the real qty in each,
+// before the transfer is raised — this used to fire blind off a plain
+// yes/no, so a yard that was actually short only showed up as a failed
+// Stock Entry after the status had already changed.
+function confirm_loading(frm, advance) {
+	frappe.call({
+		method: "thameen_erp.overrides.procurement.check_trip_stock",
+		args: { trip: frm.doc.name, vehicle: frm.doc.vehicle },
+		freeze: true,
+		freeze_message: __("Checking stock…"),
+		callback({ message }) {
+			if (!message) {
+				advance();
+				return;
+			}
+			show_loading_confirm(frm, message, advance);
+		},
+	});
+}
+
+function show_loading_confirm(frm, check, advance) {
+	const intro = check.sufficient
+		? __("Everything this trip needs is covered — some already on {0}, the rest from the warehouse below.", [
+				frm.doc.vehicle || __("the vehicle"),
+		  ])
+		: __("{0} does not have enough stock to fully load this trip.", [frm.doc.vehicle || __("The vehicle")]);
+
+	const html = `<p>${intro}</p>` + render_stock_table(check, frm.doc.vehicle);
+
+	const d = new frappe.ui.Dialog({
+		title: check.sufficient ? __("Load Vehicle") : __("Not Enough Stock to Load"),
+		size: "large",
+		fields: [{ fieldtype: "HTML", options: html }],
+		primary_action_label: check.sufficient ? __("Load Vehicle") : __("Load Anyway"),
+		primary_action() {
+			d.hide();
+			advance();
+		},
+		secondary_action_label: check.sufficient ? null : __("Order Shortfall…"),
+		secondary_action: check.sufficient
+			? null
+			: () => {
+					d.hide();
+					offer_procurement(frm, check);
+			  },
+	});
+	d.show();
 }
 
 function add_view_buttons(frm) {
@@ -1435,20 +1529,16 @@ function check_trip_stock(frm, opts) {
 	});
 }
 
-// Warehouse name and qty per row. A bare "short 50" never told anyone which
-// yard to send the truck to, which is the only reason to open this.
-function show_stock_check(frm, check) {
-	if (check.supply_source === "Direct from Supplier") {
-		show_direct_supply_check(frm, check);
-		return;
-	}
-
+// Warehouse name and qty per row, side by side with what the truck already
+// holds — a bare "short 50" never told anyone which yard to send the truck
+// to, or how much of the 50 is really missing versus already on board.
+function render_stock_table(check, vehicle_name) {
 	const rows = (check.rows || [])
 		.map(
 			(r) => `<tr class="${r.shortfall ? "table-danger" : ""}">
 				<td>${frappe.utils.escape_html(r.item_code)}</td>
 				<td class="text-right">${format_number(r.planned_qty)}</td>
-				<td>${r.on_truck_free ? frappe.utils.escape_html(frm.doc.vehicle || "") : ""}</td>
+				<td>${r.on_truck_free ? frappe.utils.escape_html(vehicle_name || "") : ""}</td>
 				<td class="text-right">${r.on_truck_free ? format_number(r.on_truck_free) : "—"}</td>
 				<td>${frappe.utils.escape_html(r.source_warehouse || "")}</td>
 				<td class="text-right">${r.from_source ? format_number(r.from_source) : "—"}</td>
@@ -1457,7 +1547,7 @@ function show_stock_check(frm, check) {
 		)
 		.join("");
 
-	const html = `<table class="table table-bordered small">
+	return `<table class="table table-bordered small">
 		<thead><tr>
 			<th>${__("Item")}</th>
 			<th class="text-right">${__("Planned")}</th>
@@ -1469,6 +1559,15 @@ function show_stock_check(frm, check) {
 		</tr></thead>
 		<tbody>${rows}</tbody>
 	</table>`;
+}
+
+function show_stock_check(frm, check) {
+	if (check.supply_source === "Direct from Supplier") {
+		show_direct_supply_check(frm, check);
+		return;
+	}
+
+	const html = render_stock_table(check, frm.doc.vehicle);
 
 	const d = new frappe.ui.Dialog({
 		title: check.sufficient ? __("Stock check — covered") : __("Stock check — not covered"),
@@ -1531,7 +1630,27 @@ function show_direct_supply_check(frm, check) {
 	d.show();
 }
 
-function offer_procurement(frm, check) {
+// `opts.on_settle(proceeded)` is only used by the submit-time gate below: it
+// fires exactly once, however the dialog closes, so a pending Submit can be
+// resumed (or left cancelled) no matter which way the dispatcher leaves this
+// dialog — a procurement action, "Submit Anyway", or just the X button.
+// Every other caller (choosing a vehicle, the Check Stock button, the
+// Loading step) passes no opts and behaves exactly as before.
+//
+// Every button below calls settle() BEFORE dialog.hide(), never after: frappe
+// wires dialog.onhide to Bootstrap's 'hide.bs.modal' event, which Modal.hide()
+// fires synchronously from inside itself. hide() first would let onhide's own
+// settle(false) run first and win the once-only guard — turning "Submit
+// Anyway" into a silent cancel.
+function offer_procurement(frm, check, opts) {
+	opts = opts || {};
+	let settled = false;
+	const settle = (proceeded) => {
+		if (settled) return;
+		settled = true;
+		if (opts.on_settle) opts.on_settle(!!proceeded);
+	};
+
 	const rows = check.shortfalls
 		.map(
 			(r) => `<tr>
@@ -1580,6 +1699,11 @@ function offer_procurement(frm, check) {
 				args: { trip: frm.doc.name, supplier: values.supplier, mode: "shortfall" },
 				freeze: true,
 				callback({ message }) {
+					// settle() before hide(): frappe wires dialog.onhide to Bootstrap's
+					// modal 'hide' event, which fires synchronously inside hide() — so
+					// calling hide() first would let onhide's settle(false) win the
+					// settled-once guard before this line ever ran.
+					settle(false);
 					dialog.hide();
 					if (message) frappe.set_route("Form", "Purchase Order", message);
 				},
@@ -1596,6 +1720,7 @@ function offer_procurement(frm, check) {
 						args: { trip: frm.doc.name, supplier },
 						freeze: true,
 						callback() {
+							settle(false);
 							dialog.hide();
 							frm.reload_doc();
 						},
@@ -1612,12 +1737,30 @@ function offer_procurement(frm, check) {
 				args: { trip: frm.doc.name },
 				freeze: true,
 				callback({ message }) {
+					settle(false);
 					dialog.hide();
 					if (message) frappe.set_route("Form", "Material Request", message);
 				},
 			});
 		})
 	);
+
+	// Only offered when this dialog is gating an actual Submit click — there
+	// is nothing to "proceed with" when it was opened from Check Stock or a
+	// vehicle change. Submitting anyway still goes through the trip's own
+	// server-side check, so a site that blocks short trips outright still
+	// blocks it there; this only skips the client-side detour for a site
+	// that merely warns.
+	if (opts.allow_submit_anyway) {
+		dialog.$wrapper.find(".modal-footer").prepend(
+			$(`<button class="btn btn-default btn-sm mr-2">${__("Submit Anyway")}</button>`).on("click", () => {
+				settle(true);
+				dialog.hide();
+			})
+		);
+	}
+
+	dialog.onhide = () => settle(false);
 
 	dialog.show();
 }

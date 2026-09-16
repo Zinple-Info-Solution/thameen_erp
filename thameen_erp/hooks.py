@@ -16,7 +16,8 @@ after_migrate = "thameen_erp.install.after_migrate"
 # Assets
 # ---------------------------------------------------------------------------
 doctype_js = {
-	"Purchase Order": ["public/js/trip_planner.js", "public/js/purchase_order.js"],
+	"Purchase Order": "public/js/purchase_order.js",
+	"Purchase Receipt": ["public/js/trip_planner.js", "public/js/purchase_receipt.js"],
 	"Vehicle": "public/js/vehicle.js",
 	"Delivery Trip": "public/js/delivery_trip.js",
 	"Sales Order": ["public/js/trip_planner.js", "public/js/sales_order.js"],
@@ -199,3 +200,4 @@ override_doctype_dashboards = {
 	"Delivery Trip": "thameen_erp.dashboards.delivery_trip_dashboard",
 	"Vehicle": "thameen_erp.dashboards.vehicle_dashboard",
 }
+

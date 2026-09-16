@@ -92,6 +92,35 @@ def vehicles_booked_on_other_trips(vehicles, exclude_trip=None):
 	return booked
 
 
+def drivers_booked_on_other_trips(drivers, exclude_trip=None):
+	"""{driver: trip} for drivers another open trip already has.
+
+	Same rule as `vehicles_booked_on_other_trips`, same reason: a driver on a
+	trip that is Scheduled, Loading or In Transit is out driving it, not free
+	to be handed a second one.
+	"""
+	if not drivers:
+		return {}
+
+	rows = frappe.get_all(
+		"Delivery Trip",
+		filters={
+			"driver": ("in", list(drivers)),
+			"docstatus": 1,
+			"status": ("in", BOOKED_TRIP_STATES),
+		},
+		fields=["name", "driver"],
+		limit_page_length=0,
+	)
+
+	booked = {}
+	for row in rows:
+		if exclude_trip and row.name == exclude_trip:
+			continue
+		booked.setdefault(row.driver, row.name)
+	return booked
+
+
 def is_configured_truck(capacity, warehouse):
 	"""A truck that can actually be planned against.
 
