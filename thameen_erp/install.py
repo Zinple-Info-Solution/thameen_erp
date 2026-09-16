@@ -1264,6 +1264,8 @@ def _apply_property_setters():
 		# Calculate Estimated Arrival Times and Optimize Route are standard
 		# ERPNext buttons that call the Google Maps Distance Matrix API —
 		# unused here, since dispatch does not route trips by geocoded stops.
+		# Total Estimated Distance is the number those same Maps calls fill
+		# in — with the buttons gone, nothing on this site ever sets it.
 		# ------------------------------------------------------------------
 		*[
 			("Delivery Trip", fieldname, "hidden", "1", "Check")
@@ -1278,6 +1280,7 @@ def _apply_property_setters():
 				"custom_cost_center",
 				"calculate_arrival_time",
 				"optimize_route",
+				"total_distance",
 			)
 		],
 		# ------------------------------------------------------------------

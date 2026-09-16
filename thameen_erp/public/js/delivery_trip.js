@@ -586,72 +586,36 @@ function show_no_room(frm, load) {
 }
 
 // ---------------------------------------------------------------------------
-// One truck chosen, one dialog at most
+// One truck chosen: is there enough cement to give it?
 //
-// Two different questions get asked when a vehicle is picked:
-//
-//   1. Is there anything to deliver?  — via check_trip_stock
-//   2. Does it fit in one journey?    — capacity, via check_vehicle_load
-//
-// What decides between them is whether the TRUCK has usable stock for this
-// trip, not whether the yard can cover the whole thing.
-//
-//   truck has some          the driver can take a load out today, so the
-//                           useful answer is "split this into journeys" —
-//                           even if the yard cannot cover the full order.
-//   truck has none          nothing can go anywhere. Splitting nothing into
-//                           three still delivers nothing, so the useful
-//                           answer is "get some cement".
-//
-// They also used to fire as two parallel calls, so whichever response landed
-// second threw its dialog on top of the first. Now they are sequenced.
+// Whether the load also fits the truck's rated capacity is a separate
+// question, answered on demand by the Split Trip / Check Load buttons —
+// this used to force that same dialog open on every vehicle pick, sufficient
+// stock or not, which is exactly what those buttons already cover.
 // ---------------------------------------------------------------------------
 
 function after_vehicle_chosen(frm) {
 	if (!frm.doc.vehicle || frm.doc.docstatus !== 0) return;
 	if (!(frm.doc.custom_trip_items || []).length) return;
-
-	// A trip that has never been saved has no rows server-side to check.
-	if (frm.is_new()) {
-		check_vehicle_load(frm, { prompt: true });
-		return;
-	}
+	// A trip that has never been saved has no rows server-side to check —
+	// stock is checked once it exists, via Check Stock or the next save.
+	if (frm.is_new()) return;
 
 	frappe.call({
 		method: "thameen_erp.overrides.procurement.check_trip_stock",
 		args: { trip: frm.doc.name, vehicle: frm.doc.vehicle },
 		callback({ message }) {
-			if (!message) return;
+			if (!message || message.sufficient) return;
 
-			if (!message.sufficient) {
-				// A direct trip's stock is a Purchase Order, not a yard.
-				if (message.supply_source === "Direct from Supplier") {
-					show_direct_supply_check(frm, message);
-					return;
-				}
-
-				// Nothing on the truck for this trip — there is no journey to
-				// plan, so ask for cement rather than offering a split.
-				if (usable_on_truck(message) <= 0.001) {
-					offer_procurement(frm, message);
-					return;
-				}
-				// Otherwise fall through: the truck is carrying something, so
-				// the split plan is the useful thing to show — forced open,
-				// because a short trip may still "fit" on capacity alone.
-				check_vehicle_load(frm, { prompt: true, check: message, force: true });
+			// A direct trip's stock is a Purchase Order, not a yard.
+			if (message.supply_source === "Direct from Supplier") {
+				show_direct_supply_check(frm, message);
 				return;
 			}
 
-			check_vehicle_load(frm, { prompt: true, check: message });
+			offer_procurement(frm, message);
 		},
 	});
-}
-
-// How much of this trip's cement is already on the truck and unclaimed by
-// another trip. Anything above zero means at least one journey can go out.
-function usable_on_truck(check) {
-	return (check.rows || []).reduce((sum, r) => sum + flt(r.on_truck_free), 0);
 }
 
 // ---------------------------------------------------------------------------
