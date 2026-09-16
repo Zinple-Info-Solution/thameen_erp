@@ -75,8 +75,14 @@ doc_events = {
 	},
 	"Delivery Note": {
 		"validate": "thameen_erp.overrides.delivery_note.validate",
-		"on_submit": "thameen_erp.overrides.delivery_note.on_submit",
-		"on_cancel": "thameen_erp.overrides.delivery_note.on_cancel",
+		"on_submit": [
+			"thameen_erp.overrides.delivery_note.on_submit",
+			"thameen_erp.overrides.vehicle_stock.refresh_vehicle_loads_for_doc",
+		],
+		"on_cancel": [
+			"thameen_erp.overrides.delivery_note.on_cancel",
+			"thameen_erp.overrides.vehicle_stock.refresh_vehicle_loads_for_doc",
+		],
 	},
 	"Purchase Order": {
 		"validate": "thameen_erp.overrides.purchase.validate_expected_discount",
@@ -99,8 +105,14 @@ doc_events = {
 	# Direct-from-supplier trips: keep the trip's receipt/order links honest
 	# when purchasing cancels something underneath them.
 	"Purchase Receipt": {
-		"on_submit": "thameen_erp.overrides.procurement.link_shortfall_receipt_to_trip",
-		"on_cancel": "thameen_erp.overrides.procurement.purchase_receipt_on_cancel",
+		"on_submit": [
+			"thameen_erp.overrides.procurement.link_shortfall_receipt_to_trip",
+			"thameen_erp.overrides.vehicle_stock.refresh_vehicle_loads_for_doc",
+		],
+		"on_cancel": [
+			"thameen_erp.overrides.procurement.purchase_receipt_on_cancel",
+			"thameen_erp.overrides.vehicle_stock.refresh_vehicle_loads_for_doc",
+		],
 		"validate": "thameen_erp.overrides.vehicle_stock.validate_vehicle_warehouse_capacity",
 	},
 	# A vehicle warehouse is the truck, so it cannot hold more than the truck
@@ -108,11 +120,18 @@ doc_events = {
 	# other doors into the same warehouse.
 	"Stock Entry": {
 		"validate": "thameen_erp.overrides.vehicle_stock.validate_vehicle_warehouse_capacity",
+		"on_submit": "thameen_erp.overrides.vehicle_stock.refresh_vehicle_loads_for_doc",
+		"on_cancel": "thameen_erp.overrides.vehicle_stock.refresh_vehicle_loads_for_doc",
 	},
 	"Stock Reconciliation": {
 		"validate": "thameen_erp.overrides.vehicle_stock.validate_vehicle_warehouse_capacity",
+		"on_submit": "thameen_erp.overrides.vehicle_stock.refresh_vehicle_loads_for_doc",
+		"on_cancel": "thameen_erp.overrides.vehicle_stock.refresh_vehicle_loads_for_doc",
 	},
-	# Keep Vehicle.On Truck Qty equal to the vehicle warehouse at all times.
+	# Belt-and-braces: Stock Ledger Entry after_insert catches everything else
+	# (and fires first, in-transaction). The voucher-level hooks above exist
+	# because Purchase Receipt in particular can write its stock ledger
+	# entries through a path that skips this one.
 	"Stock Ledger Entry": {
 		"after_insert": "thameen_erp.overrides.vehicle_load.on_stock_ledger_entry",
 	},

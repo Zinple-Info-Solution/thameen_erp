@@ -1606,6 +1606,10 @@ function offer_procurement(frm, check, opts) {
 		if (opts.on_close) opts.on_close();
 	};
 
+	// "Short" is what is not yet on the truck — the yard having plenty does
+	// not clear it, submitting requires it loaded. "Still to buy" is the
+	// narrower number under that: whatever even the yard cannot cover. A row
+	// can be short and need nothing bought at all — it just needs loading.
 	const rows = check.shortfalls
 		.map(
 			(r) => `<tr>
@@ -1613,50 +1617,74 @@ function offer_procurement(frm, check, opts) {
 				<td class="text-right">${format_number(r.planned_qty)}</td>
 				<td class="text-right">${format_number(r.on_truck_free)}</td>
 				<td class="text-right">${format_number(r.from_source)}</td>
-				<td class="text-right"><b>${format_number(r.shortfall)}</b></td>
+				<td class="text-right">${format_number(r.shortfall)}</td>
+				<td class="text-right"><b>${format_number(r.purchase_shortfall)}</b></td>
 			</tr>`
 		)
 		.join("");
 
-	const warehouses = Array.from(new Set(check.shortfalls.map((r) => r.source_warehouse).filter(Boolean)));
-	const warehouse_label = warehouses.length ? warehouses.join(", ") : __("no warehouse set");
+	const all_in_yard = check.shortfalls.every((r) => flt(r.purchase_shortfall) <= 0.001);
+	const intro = all_in_yard
+		? __("Not yet loaded onto {0} — the yard already has it, this trip just needs loading.", [
+				frm.doc.vehicle || __("the vehicle"),
+		  ])
+		: __("Not enough on {0}, and the yard cannot cover the rest either.", [frm.doc.vehicle || __("the vehicle")]);
 
 	const html = `
-		<p>${__("The required quantity is not available in the loading warehouse ({0}).", [frappe.utils.escape_html(warehouse_label)])}</p>
+		<p>${intro}</p>
 		<table class="table table-bordered small">
 			<thead><tr>
 				<th>${__("Item")}</th>
 				<th class="text-right">${__("Planned")}</th>
 				<th class="text-right">${__("On truck")}</th>
 				<th class="text-right">${__("In warehouse")}</th>
-				<th class="text-right">${__("Short")}</th>
+				<th class="text-right">${__("Not loaded")}</th>
+				<th class="text-right">${__("Still to buy")}</th>
 			</tr></thead>
 			<tbody>${rows}</tbody>
 		</table>
-		<p class="text-muted small"><em>${__("Purchase the shortage and load the truck once received.")}</em></p>`;
+		<p class="text-muted small"><em>${
+			all_in_yard
+				? __("Load the truck from the yard — nothing here needs buying.")
+				: __("Purchase the shortage and load the truck once received.")
+		}</em></p>`;
 
+	// Nothing to buy when the yard already covers every row's shortfall —
+	// "Create Purchase Order" / "Material Request" would both fail server-side
+	// ("Nothing to order — every row is covered by stock on hand") since
+	// `purchase_shortfall` is 0 everywhere. Point at the Vehicle to load it
+	// instead of offering two buttons guaranteed to error.
 	const dialog = new frappe.ui.Dialog({
 		title: __("Insufficient Stock"),
 		size: "large",
-		fields: [
-			{ fieldtype: "HTML", fieldname: "summary", options: html },
-			{
-				fieldname: "supplier",
-				fieldtype: "Link",
-				options: "Supplier",
-				label: __("Supplier"),
-				// Same supplier the trip already has (from an earlier PO or
-				// receipt), so a second shortfall on the same trip buys from
-				// the same place by default. Blank only when the trip has
-				// none yet, in which case Default Cement Supplier applies.
-				default: frm.doc.custom_supplier || undefined,
-				description: frm.doc.custom_supplier
-					? undefined
-					: __("Blank falls back to the Default Cement Supplier in the settings."),
-			},
-		],
-		primary_action_label: __("Create Purchase Order for Shortfall"),
+		fields: all_in_yard
+			? [{ fieldtype: "HTML", fieldname: "summary", options: html }]
+			: [
+					{ fieldtype: "HTML", fieldname: "summary", options: html },
+					{
+						fieldname: "supplier",
+						fieldtype: "Link",
+						options: "Supplier",
+						label: __("Supplier"),
+						// Same supplier the trip already has (from an earlier PO
+						// or receipt), so a second shortfall on the same trip
+						// buys from the same place by default. Blank only when
+						// the trip has none yet, in which case Default Cement
+						// Supplier applies.
+						default: frm.doc.custom_supplier || undefined,
+						description: frm.doc.custom_supplier
+							? undefined
+							: __("Blank falls back to the Default Cement Supplier in the settings."),
+					},
+			  ],
+		primary_action_label: all_in_yard ? __("Go to Vehicle") : __("Create Purchase Order for Shortfall"),
 		primary_action(values) {
+			if (all_in_yard) {
+				close();
+				dialog.hide();
+				if (frm.doc.vehicle) frappe.set_route("Form", "Vehicle", frm.doc.vehicle);
+				return;
+			}
 			frappe.call({
 				method: "thameen_erp.overrides.procurement.make_purchase_order",
 				args: { trip: frm.doc.name, supplier: values.supplier, mode: "shortfall" },
@@ -1670,21 +1698,24 @@ function offer_procurement(frm, check, opts) {
 		},
 	});
 
-	// A second, quieter option for sites where dispatch does not buy.
-	dialog.$wrapper.find(".modal-footer").prepend(
-		$(`<button class="btn btn-default btn-sm mr-auto">${__("Material Request instead")}</button>`).on("click", () => {
-			frappe.call({
-				method: "thameen_erp.overrides.procurement.make_material_request",
-				args: { trip: frm.doc.name },
-				freeze: true,
-				callback({ message }) {
-					close();
-					dialog.hide();
-					if (message) frappe.set_route("Form", "Material Request", message);
-				},
-			});
-		})
-	);
+	// A second, quieter option for sites where dispatch does not buy — only
+	// offered when there is actually something left to ask for.
+	if (!all_in_yard) {
+		dialog.$wrapper.find(".modal-footer").prepend(
+			$(`<button class="btn btn-default btn-sm mr-auto">${__("Material Request instead")}</button>`).on("click", () => {
+				frappe.call({
+					method: "thameen_erp.overrides.procurement.make_material_request",
+					args: { trip: frm.doc.name },
+					freeze: true,
+					callback({ message }) {
+						close();
+						dialog.hide();
+						if (message) frappe.set_route("Form", "Material Request", message);
+					},
+				});
+			})
+		);
+	}
 
 	dialog.onhide = () => close();
 

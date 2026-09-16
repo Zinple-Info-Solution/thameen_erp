@@ -418,13 +418,14 @@ def find_stock_warehouse(item_code, company=None, exclude=None):
 
 
 @frappe.whitelist()
-def manual_load(vehicle, direction, warehouse, items, allow_over_capacity=0, remarks=None):
+def manual_load(vehicle, direction, warehouse, items, remarks=None):
 	"""Move stock yard → truck (load) or truck → yard (unload).
 
-	One submitted Material Transfer. Over-capacity is a confirmed warning when
-	the setting allows it; insufficient stock is always a hard stop — ERPNext
-	would reject the Stock Entry anyway, this just says why in plain words
-	first.
+	One submitted Material Transfer. Insufficient stock and over-capacity are
+	both always a hard stop — ERPNext (insufficient stock) and the vehicle
+	warehouse capacity hook (over capacity) would reject the Stock Entry
+	anyway, this just says why in plain words first, before anything is
+	written.
 	"""
 	frappe.has_permission("Stock Entry", "create", throw=True)
 
@@ -447,8 +448,8 @@ def manual_load(vehicle, direction, warehouse, items, allow_over_capacity=0, rem
 		)
 
 	if preview["over_capacity"]:
-		# A truck rated 20 holding 10 takes 10 more, not 20. Loading past that
-		# is refused unless the setting is deliberately switched on.
+		# A truck rated 20 holding 10 takes 10 more, not 20. Always refused —
+		# there is no confirmation that gets past a vehicle's rated capacity.
 		message = _("{0} holds {1} of {2} — room for {3} more, and this would load {4}.").format(
 			frappe.bold(vehicle),
 			flt(preview["on_truck_now"], 2),
@@ -456,13 +457,7 @@ def manual_load(vehicle, direction, warehouse, items, allow_over_capacity=0, rem
 			flt(preview["room_for"], 2),
 			flt(preview["moving"], 2),
 		)
-		allowed = cint(
-			frappe.db.get_single_value("Thameen Fleet Settings", "allow_over_capacity_manual_load")
-		)
-		if not allowed:
-			frappe.throw(message, title=_("Over Capacity"))
-		if not cint(allow_over_capacity):
-			frappe.throw(message + " " + _("Confirm the overload to continue."), title=_("Over Capacity"))
+		frappe.throw(message, title=_("Over Capacity"))
 
 	vehicle_wh = preview["vehicle_warehouse"]
 	company = frappe.db.get_value("Warehouse", vehicle_wh, "company")
@@ -764,3 +759,37 @@ def validate_vehicle_warehouse_capacity(doc, method=None):
 			),
 			title=_("Over Vehicle Capacity"),
 		)
+
+
+def _touched_warehouses(doc):
+	warehouses = set()
+	for row in doc.get("items") or []:
+		for key in ("warehouse", "t_warehouse", "s_warehouse"):
+			if row.get(key):
+				warehouses.add(row.get(key))
+	return warehouses
+
+
+def refresh_vehicle_loads_for_doc(doc, method=None):
+	"""Keep On Truck Qty live for every vehicle warehouse this document touches.
+
+	The Stock Ledger Entry `after_insert` hook normally does this, but ERPNext
+	does not always write stock ledger entries through the ORM — a Purchase
+	Receipt in particular can post them by a path that skips document hooks
+	entirely, so the Vehicle's cached On Truck / Available figures silently
+	stop matching the warehouse. This hooks the voucher itself as a second,
+	independent way to the same recount, so a cache miss on one side is
+	caught by the other.
+	"""
+	warehouses = _touched_warehouses(doc)
+	if not warehouses:
+		return
+
+	vehicles = _vehicles_by_warehouse(warehouses)
+	if not vehicles:
+		return
+
+	from thameen_erp.overrides.vehicle_load import refresh_vehicle_load
+
+	for vehicle, _capacity in vehicles.values():
+		refresh_vehicle_load(vehicle)

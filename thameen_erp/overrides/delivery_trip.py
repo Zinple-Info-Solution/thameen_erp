@@ -455,9 +455,10 @@ class ThameenDeliveryTrip(DeliveryTrip):
 		comparing a bag count against a tonne rating was the old bug here.
 
 		Capacity is a per-journey limit, not a pool spread over the calendar, so
-		only trips sharing this one's departure date count against it. Turn
-		'Block Trips Above Vehicle Capacity' off in Thameen Fleet Settings to go
-		back to a warning.
+		only trips sharing this one's departure date count against it. This is
+		an absolute ceiling — there is no setting or flag anywhere that turns
+		it into a warning, on a draft, a submit, or a trip produced by Split
+		Into Trips.
 		"""
 		if not self.get("vehicle"):
 			return
@@ -525,22 +526,12 @@ class ThameenDeliveryTrip(DeliveryTrip):
 				flt(committed, 2),
 			)
 
-		block = frappe.db.get_single_value("Thameen Fleet Settings", "block_trip_over_capacity")
-		if block is None:
-			block = 1
-
-		# The split and plan flows deliberately produce over-capacity trips and
-		# report them afterwards — blocking their own writes would make the fix
-		# for an overloaded trip impossible to apply.
-		if cint(block) and not self.flags.thameen_splitting:
-			frappe.throw(
-				message
-				+ " "
-				+ _("Reduce the quantity, choose a bigger truck, or use Split Into Trips."),
-				title=_("Over Capacity"),
-			)
-		else:
-			frappe.msgprint(message, indicator="orange", title=_("Over Capacity"))
+		frappe.throw(
+			message
+			+ " "
+			+ _("Reduce the quantity, choose a bigger truck, or use Split Into Trips."),
+			title=_("Over Capacity"),
+		)
 
 	def _validate_vehicle_item_conflict(self):
 		"""A truck already carrying a different cement cannot take this trip.
@@ -582,14 +573,20 @@ class ThameenDeliveryTrip(DeliveryTrip):
 		)
 
 	def _validate_stock_available(self):
-		"""A trip may not be submitted if nothing can fill it.
+		"""A trip may not be submitted unless the cement is already ON THE
+		TRUCK — the yard having plenty of it does not count, even though
+		Loading could fetch it from there. Measured the same way the Check
+		Stock button measures it: what is on the truck now and not already
+		promised to another loaded trip.
 
-		Measured the same way the Check Stock button measures it: what is
-		already on the truck and unclaimed by another loaded trip, plus what
-		the row's loading warehouse holds. Both in STOCK units.
+		This is deliberately stricter than "the yard can cover it eventually":
+		it puts loading BEFORE submit instead of after — load the truck by
+		hand first (the Vehicle form's own Load action, or a Stock Entry),
+		then submit. Loading afterwards then finds nothing left to move (see
+		`load_vehicle`'s "already on truck" case) and is just a status change.
 
-		Only at submit. A draft is a plan — the cement is often still being
-		bought while dispatch builds it, and blocking the save would make the
+		Only at submit. A draft is a plan — the truck is often still being
+		loaded while dispatch builds it, and blocking the save would make the
 		trip impossible to write down.
 
 		Direct-from-supplier trips are exempt: their stock is the Purchase
@@ -616,44 +613,42 @@ class ThameenDeliveryTrip(DeliveryTrip):
 		)
 
 		used_truck = {}
-		used_source = {}
 		shortfalls = []
 
 		for row in rows:
 			needed = flt(row.qty) * (flt(row.conversion_factor) or 1)
-			source = row.source_warehouse or self.get("custom_loading_warehouse")
 
-			# Rows of the same item share one truck balance and one yard
-			# balance — walk them in order so the second row cannot spend the
-			# same cement the first already took.
+			# Rows of the same item share one truck balance — walk them in
+			# order so the second row cannot spend what the first already took.
 			on_truck = max(flt(free.get(row.item_code)) - flt(used_truck.get(row.item_code)), 0.0)
 			from_truck = min(needed, on_truck)
 			used_truck[row.item_code] = flt(used_truck.get(row.item_code)) + from_truck
 
-			key = (row.item_code, source)
-			in_yard = max(_bin_qty(row.item_code, source) - flt(used_source.get(key)), 0.0)
-			from_source = min(needed - from_truck, in_yard)
-			used_source[key] = flt(used_source.get(key)) + from_source
-
-			short = needed - from_truck - from_source
+			short = needed - from_truck
 			if short > QTY_TOLERANCE:
+				source = row.source_warehouse or self.get("custom_loading_warehouse")
+				in_yard = flt(_bin_qty(row.item_code, source)) if source else 0.0
+				yard_note = (
+					_(" ({0} available in {1}, once loaded)").format(flt(in_yard, 2), source)
+					if in_yard > QTY_TOLERANCE
+					else ""
+				)
 				shortfalls.append(
-					_("Row {0} ({1}): need {2}, have {3} on {4} and {5} in {6} — short {7}.").format(
+					_("Row {0} ({1}): need {2}, have {3} on {4} — short {5}{6}.").format(
 						row.idx,
 						row.item_code,
 						flt(needed, 2),
 						flt(from_truck, 2),
 						self.get("vehicle") or _("the truck"),
-						flt(from_source, 2),
-						source or _("no warehouse set"),
 						flt(short, 2),
+						yard_note,
 					)
 				)
 
 		if not shortfalls:
 			return
 
-		message = _("There is not enough stock to fill this trip.") + "<br><br>" + "<br>".join(shortfalls)
+		message = _("There is not enough stock on the truck to fill this trip.") + "<br><br>" + "<br>".join(shortfalls)
 
 		block = frappe.db.get_single_value("Thameen Fleet Settings", "block_trip_without_stock")
 		if block is None:
@@ -663,11 +658,11 @@ class ThameenDeliveryTrip(DeliveryTrip):
 			frappe.throw(
 				message
 				+ "<br><br>"
-				+ _("Reduce the quantity, load the truck first, or raise a Purchase Order for the shortfall."),
-				title=_("Not Enough Stock"),
+				+ _("Load the truck first — the Vehicle's own Load action, or a Stock Entry — then submit."),
+				title=_("Not Enough Stock On Truck"),
 			)
 		else:
-			frappe.msgprint(message, indicator="orange", title=_("Not Enough Stock"))
+			frappe.msgprint(message, indicator="orange", title=_("Not Enough Stock On Truck"))
 
 	def _set_pod_flag(self):
 		rows = [row for row in (self.get("custom_pod_documents") or []) if row.get("attachment")]

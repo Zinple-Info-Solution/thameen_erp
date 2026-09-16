@@ -126,7 +126,19 @@ def check_trip_stock(trip, vehicle=None):
 
 def _net_off_shared_source(result):
 	"""Two rows of OPC-43 from Main Store each see the full Main Store balance
-	above. Walk them in order and let each consume what the earlier ones took."""
+	above. Walk them in order and let each consume what the earlier ones took.
+
+	`shortfall` (what is not yet on the truck) decides "sufficient" now —
+	`_validate_stock_available` only counts what is already loaded, so this
+	matches it: cement the yard could easily cover still leaves the trip
+	short until it is actually on the truck.
+
+	`purchase_shortfall` is the narrower number `make_purchase_order`'s
+	shortfall mode actually buys against: whatever of the truck-shortfall
+	the yard ALSO cannot cover. Without this split, "buy the shortfall" would
+	buy cement a second time whenever the yard already has it and the truck
+	simply has not been loaded yet.
+	"""
 	taken = {}
 	result["shortfalls"] = []
 	result["sufficient"] = True
@@ -137,8 +149,13 @@ def _net_off_shared_source(result):
 		from_source = min(need_from_source, left)
 		taken[key] = flt(taken.get(key)) + from_source
 		line["from_source"] = from_source
-		short = max(need_from_source - from_source, 0.0)
+
+		short = max(need_from_source, 0.0)
 		line["shortfall"] = short if short > QTY_TOLERANCE else 0.0
+
+		to_buy = max(need_from_source - from_source, 0.0)
+		line["purchase_shortfall"] = to_buy if to_buy > QTY_TOLERANCE else 0.0
+
 		if line["shortfall"]:
 			result["shortfalls"].append(line)
 			result["sufficient"] = False
@@ -220,17 +237,21 @@ def make_purchase_order(trip, supplier=None, rows=None, mode="shortfall", schedu
 		# back to this trip, same as a direct-supply PO already does. Only
 		# falls back to the loading warehouse when no vehicle is assigned yet.
 		warehouse = _vehicle_warehouse_or_loading(doc)
+		# `purchase_shortfall`, not `shortfall`: the latter is "not yet on
+		# the truck," which the yard may already cover in full — buying that
+		# again would double it. Only what the yard ALSO cannot cover is
+		# genuinely missing and worth a Purchase Order.
 		lines = [
 			{
 				"row_name": None,
 				"item_code": r["item_code"],
-				"qty": flt(r["shortfall"]) / (flt(r["conversion_factor"]) or 1),
+				"qty": flt(r["purchase_shortfall"]) / (flt(r["conversion_factor"]) or 1),
 				"uom": r["uom"],
 				"conversion_factor": flt(r["conversion_factor"]) or 1,
 				"warehouse": warehouse,
 			}
 			for r in check["shortfalls"]
-			if not wanted or r["idx"] in wanted
+			if flt(r.get("purchase_shortfall")) > QTY_TOLERANCE and (not wanted or r["idx"] in wanted)
 		]
 
 	if not lines:
@@ -302,7 +323,14 @@ def make_material_request(trip, rows=None):
 	if isinstance(rows, str):
 		rows = json.loads(rows or "[]")
 	wanted = {r.get("idx") for r in (rows or [])} if rows else None
-	lines = [r for r in check["shortfalls"] if not wanted or r["idx"] in wanted]
+	# `purchase_shortfall`, not `shortfall` — a Material Request is a buy
+	# request too, and must not ask for cement the yard already has just
+	# because it has not been loaded onto the truck yet.
+	lines = [
+		r
+		for r in check["shortfalls"]
+		if flt(r.get("purchase_shortfall")) > QTY_TOLERANCE and (not wanted or r["idx"] in wanted)
+	]
 	if not lines:
 		frappe.throw(_("Nothing short — every row is covered by stock on hand."))
 
@@ -321,7 +349,7 @@ def make_material_request(trip, rows=None):
 			"items",
 			{
 				"item_code": r["item_code"],
-				"qty": flt(r["shortfall"]) / (flt(r["conversion_factor"]) or 1),
+				"qty": flt(r["purchase_shortfall"]) / (flt(r["conversion_factor"]) or 1),
 				"uom": r["uom"],
 				"conversion_factor": flt(r["conversion_factor"]) or 1,
 				"warehouse": r["source_warehouse"],

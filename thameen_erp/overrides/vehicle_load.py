@@ -665,7 +665,6 @@ def split_trip(trip, vehicle=None, use_capacity=0, assignments=None, plan=None):
 
 	# 2. Everything else becomes a fresh draft.
 	created = []
-	warnings = []
 	for index, chunk in enumerate(loads[1:]):
 		new_trip = frappe.new_doc("Delivery Trip")
 		new_trip.update(template)
@@ -676,10 +675,6 @@ def split_trip(trip, vehicle=None, use_capacity=0, assignments=None, plan=None):
 			driver = frappe.db.get_value("Vehicle", assigned, "custom_assigned_driver")
 			if driver:
 				new_trip.driver = driver
-			cap = flt(frappe.db.get_value("Vehicle", assigned, "custom_capacity"))
-			chunk_qty = sum(stock_qty(row) for row in chunk)
-			if cap and chunk_qty > cap + QTY_TOLERANCE:
-				warnings.append(_("trip {0}: {1} on {2} (capacity {3})").format(index + 2, flt(chunk_qty, 2), assigned, flt(cap, 2)))
 
 		if index + 1 < len(departures) and departures[index + 1]:
 			new_trip.departure_time = departures[index + 1]
@@ -690,14 +685,6 @@ def split_trip(trip, vehicle=None, use_capacity=0, assignments=None, plan=None):
 		new_trip.flags.thameen_splitting = True
 		new_trip.insert()
 		created.append(new_trip.name)
-
-	if warnings:
-		frappe.msgprint(
-			_("Some trips are above their truck's rated capacity — {0}. They will still submit; the overload is reported, not refused.").format(
-				"; ".join(warnings)
-			),
-			indicator="orange",
-		)
 
 	frappe.msgprint(
 		_("{0} kept {1}. {2} further trip(s) created: {3}").format(

@@ -11,8 +11,6 @@
   "cement_income_account",
   "default_company",
   "default_cement_supplier",
-  "allow_over_capacity_manual_load",
-  "block_trip_over_capacity",
   "block_trip_without_stock",
   "sec_ops",
   "auto_create_delivery_trip",
@@ -125,20 +123,6 @@
    "label": "Default Cement Supplier",
    "options": "Supplier",
    "description": "Pre-selected when a Purchase Order is raised for a stock shortfall or a direct-from-supplier trip."
-  },
-  {
-   "fieldname": "allow_over_capacity_manual_load",
-   "fieldtype": "Check",
-   "label": "Allow Manual Loading Above Capacity",
-   "default": "0",
-   "description": "Let a manual load push a vehicle past its rated capacity, after a confirmation. Off means the load is refused outright."
-  },
-  {
-   "default": "1",
-   "description": "Refuse to save a Delivery Trip whose planned qty is above the free space on its vehicle. Turn off to warn instead.",
-   "fieldname": "block_trip_over_capacity",
-   "fieldtype": "Check",
-   "label": "Block Trips Above Vehicle Capacity"
   },
   {
    "default": "1",

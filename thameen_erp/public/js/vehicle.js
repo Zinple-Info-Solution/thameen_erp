@@ -218,7 +218,7 @@ function open_load_dialog(frm, direction) {
 		],
 		primary_action_label: loading ? __("Load") : __("Unload"),
 		primary_action(values) {
-			submit_manual_load(frm, dialog, direction, values, 0);
+			submit_manual_load(frm, dialog, direction, values);
 		},
 	});
 
@@ -322,7 +322,7 @@ function render_preview(wrapper, p, direction, vehicle) {
 			frappe.utils.escape_html(p.rows[0].source_warehouse),
 		])}</div>`;
 	} else if (p.over_capacity) {
-		verdict = `<div class="alert alert-warning small">${__("After loading, {0} will hold {1} — {2} above its rated capacity of {3}. You will be asked to confirm.", [
+		verdict = `<div class="alert alert-danger small">${__("After loading, {0} would hold {1} — {2} above its rated capacity of {3}. The transfer will be refused; reduce the quantity or choose a different vehicle.", [
 			frappe.utils.escape_html(vehicle),
 			format_number(p.on_truck_after),
 			format_number(p.over_by),
@@ -348,7 +348,7 @@ function render_preview(wrapper, p, direction, vehicle) {
 		${verdict}`);
 }
 
-function submit_manual_load(frm, dialog, direction, values, allow_over_capacity) {
+function submit_manual_load(frm, dialog, direction, values) {
 	const items = collect_items(dialog);
 	if (!items.length) {
 		frappe.msgprint(__("Add at least one item with a quantity."));
@@ -367,35 +367,33 @@ function submit_manual_load(frm, dialog, direction, values, allow_over_capacity)
 				return;
 			}
 
-			const go = () =>
-				frappe.call({
-					method: "thameen_erp.overrides.vehicle_stock.manual_load",
-					args: {
-						vehicle: frm.doc.name,
-						direction,
-						warehouse: values.warehouse,
-						items: JSON.stringify(items),
-						allow_over_capacity: allow_over_capacity ? 1 : 0,
-						remarks: values.remarks,
-					},
-					freeze: true,
-					freeze_message: direction === "load" ? __("Loading…") : __("Unloading…"),
-					callback() {
-						dialog.hide();
-						frm.reload_doc();
-					},
-				});
-
-			if (p.over_capacity && !allow_over_capacity) {
-				frappe.confirm(
-					__("{0} will hold {1} after loading — {2} above its rated capacity of {3}. Load anyway?", [
+			if (p.over_capacity) {
+				frappe.msgprint({
+					title: __("Over Capacity"),
+					indicator: "red",
+					message: __("{0} will hold {1} after loading — {2} above its rated capacity of {3}. Reduce the quantity or choose a different vehicle.", [
 						frm.doc.name, format_number(p.on_truck_after), format_number(p.over_by), format_number(p.capacity),
 					]),
-					() => submit_manual_load(frm, dialog, direction, values, 1)
-				);
+				});
 				return;
 			}
-			go();
+
+			frappe.call({
+				method: "thameen_erp.overrides.vehicle_stock.manual_load",
+				args: {
+					vehicle: frm.doc.name,
+					direction,
+					warehouse: values.warehouse,
+					items: JSON.stringify(items),
+					remarks: values.remarks,
+				},
+				freeze: true,
+				freeze_message: direction === "load" ? __("Loading…") : __("Unloading…"),
+				callback() {
+					dialog.hide();
+					frm.reload_doc();
+				},
+			});
 		},
 	});
 }

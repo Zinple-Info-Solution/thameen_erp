@@ -1366,6 +1366,14 @@ def _apply_property_setters():
 		# the table with it. Sales Order / Purchase Order / Purchase Receipt
 		# / Purchase Invoice carry no timesheet fields, hence nothing to do.
 		("Sales Invoice", "time_sheet_list", "hidden", "1", "Check"),
+		# Committed Qty and Available Qty are still computed and used internally
+		# (capacity checks read them live, never from the cache) but reading two
+		# extra numbers next to On Truck Qty on the form was just noise for
+		# dispatch — On Truck Qty is the one figure that matters at a glance.
+		# Nothing is deleted: both fields, and the Truck Stock dialog that still
+		# shows Committed Qty, are unaffected.
+		("Vehicle", "custom_committed_qty", "hidden", "1", "Check"),
+		("Vehicle", "custom_available_qty", "hidden", "1", "Check"),
 	]
 	for doctype, fieldname, prop, value, prop_type in setters:
 		try:

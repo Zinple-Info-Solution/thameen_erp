@@ -44,6 +44,18 @@ thameen.trip_planner._free = function (dialog, name) {
 	return flt(v.free !== undefined ? v.free : v.available);
 };
 
+// What this row can actually claim on that truck: free room to load, PLUS
+// whatever of the SAME cement is already sitting there unclaimed by another
+// trip. A truck already carrying the very item this row wants is not "over"
+// just because it has no empty room left — that cement on it IS the load,
+// nothing more needs to be loaded onto it. Falls back to `_free` for a
+// caller (or an older cached vehicle row) that never got `planable`.
+thameen.trip_planner._planable = function (dialog, name) {
+	const v = (dialog.planner.vehicles || []).find((x) => x.name === name);
+	if (!v || !flt(v.capacity)) return null;
+	return flt(v.planable !== undefined ? v.planable : thameen.trip_planner._free(dialog, name));
+};
+
 // The truck's own rating, full stop — not reduced by what other trips have
 // already claimed. This is the ceiling a qty is not allowed past: a
 // 30-capacity truck takes at most 30 on THIS trip, regardless of what else
@@ -310,16 +322,20 @@ thameen.trip_planner._draw = function (dialog) {
 
 	const rows = plan
 		.map((p, i) => {
-			// Compared against FREE space, not the rating: a truck with 180 of
-			// its 300 already promised elsewhere has 120, not 300.
-			const free = thameen.trip_planner._free(dialog, p.vehicle);
-			const over = free !== null && flt(p.qty) > free + TP_TOL;
+			// Compared against what this row can actually claim: free room to
+			// load PLUS whatever of this same item is already on the truck and
+			// not claimed by another trip. A truck with 180 of its 300 already
+			// promised elsewhere has 120, not 300 — but a truck already
+			// carrying this row's own cement, untouched by any other trip,
+			// counts that cement toward the row, not against it.
+			const planable = thameen.trip_planner._planable(dialog, p.vehicle);
+			const over = planable !== null && flt(p.qty) > planable + TP_TOL;
 			const { date, time } = thameen.trip_planner._split_dt(p.departure_time);
 			return `<tr class="${over ? "table-warning" : ""}">
 				<td>${i + 1}</td>
 				<td>${frappe.utils.escape_html(p.label || p.item_code)}</td>
 				<td><input type="text" inputmode="decimal" class="form-control input-xs tp-qty no-spin" data-i="${i}" value="${p.qty}" style="width:110px">
-					${over ? `<div class="text-danger small">${__("over by {0}", [format_number(flt(p.qty) - free)])}</div>` : ""}</td>
+					${over ? `<div class="text-danger small">${__("over by {0}", [format_number(flt(p.qty) - planable)])}</div>` : ""}</td>
 				<td><select class="form-control input-xs tp-vehicle" data-i="${i}">${vehicle_opts(p.vehicle, i, p.item_code)}</select></td>
 				<td>${truck_state(p)}</td>
 				<td><select class="form-control input-xs tp-driver" data-i="${i}">${driver_opts(p.driver, i)}</select></td>
