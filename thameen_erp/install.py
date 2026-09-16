@@ -1251,6 +1251,36 @@ def _apply_property_setters():
 			"Data",
 		),
 		# ------------------------------------------------------------------
+		# Delivery Trip form slimming. Trip Route already sets Supply Source
+		# and Destination together, so the pair stays on the doctype (every
+		# validation rule still reads them) but off the form — a dispatcher
+		# has one thing to pick, not three. Loading Warehouse, Transport
+		# Type and Customer Warehouse are filled automatically the same way.
+		# Odometer readings and Cost Center are still recorded, just not on
+		# this form. Nothing here is deleted — clearing the Property Setter
+		# (or unticking Hidden in Customize Form) brings any field straight
+		# back, with whatever value it already holds intact.
+		#
+		# Calculate Estimated Arrival Times and Optimize Route are standard
+		# ERPNext buttons that call the Google Maps Distance Matrix API —
+		# unused here, since dispatch does not route trips by geocoded stops.
+		# ------------------------------------------------------------------
+		*[
+			("Delivery Trip", fieldname, "hidden", "1", "Check")
+			for fieldname in (
+				"custom_loading_warehouse",
+				"custom_trip_type",
+				"custom_supply_source",
+				"custom_destination_type",
+				"custom_customer_warehouse",
+				"custom_starting_odometer",
+				"custom_ending_odometer",
+				"custom_cost_center",
+				"calculate_arrival_time",
+				"optimize_route",
+			)
+		],
+		# ------------------------------------------------------------------
 		# Sales Order / Sales Invoice form slimming.
 		#
 		# Cement distribution runs in one currency off one price list, with no

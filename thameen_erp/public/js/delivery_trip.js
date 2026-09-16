@@ -1663,8 +1663,11 @@ function offer_procurement(frm, check, opts) {
 		)
 		.join("");
 
+	const warehouses = Array.from(new Set(check.shortfalls.map((r) => r.source_warehouse).filter(Boolean)));
+	const warehouse_label = warehouses.length ? warehouses.join(", ") : __("no warehouse set");
+
 	const html = `
-		<p>${__("The yard cannot fill this trip. Per item, in stock units:")}</p>
+		<p>${__("The required quantity is not available in the loading warehouse ({0}).", [frappe.utils.escape_html(warehouse_label)])}</p>
 		<table class="table table-bordered small">
 			<thead><tr>
 				<th>${__("Item")}</th>
@@ -1675,9 +1678,7 @@ function offer_procurement(frm, check, opts) {
 			</tr></thead>
 			<tbody>${rows}</tbody>
 		</table>
-		<p class="text-muted small">${__(
-			"Purchase Order: buy the shortfall into the loading warehouse; the trip loads from the yard once it is received. Direct Supply: the truck collects the whole trip at the supplier and delivers straight to site."
-		)}</p>`;
+		<p class="text-muted small"><em>${__("Purchase the shortage and load the truck once received.")}</em></p>`;
 
 	const dialog = new frappe.ui.Dialog({
 		title: __("Insufficient Stock"),
@@ -1689,7 +1690,7 @@ function offer_procurement(frm, check, opts) {
 				fieldtype: "Link",
 				options: "Supplier",
 				label: __("Supplier"),
-				description: __("Used by both buttons below. Blank falls back to the Default Cement Supplier in the settings."),
+				description: __("Blank falls back to the Default Cement Supplier in the settings."),
 			},
 		],
 		primary_action_label: __("Create Purchase Order for Shortfall"),
@@ -1708,24 +1709,6 @@ function offer_procurement(frm, check, opts) {
 					if (message) frappe.set_route("Form", "Purchase Order", message);
 				},
 			});
-		},
-		secondary_action_label: __("Switch to Direct Supply"),
-		secondary_action() {
-			const supplier = dialog.get_value("supplier");
-			frappe.confirm(
-				__("Change this trip to Direct from Supplier and raise a Purchase Order for the full trip? The cement will be received straight onto the truck at Loading."),
-				() =>
-					frappe.call({
-						method: "thameen_erp.overrides.procurement.switch_to_direct_supply",
-						args: { trip: frm.doc.name, supplier },
-						freeze: true,
-						callback() {
-							settle(false);
-							dialog.hide();
-							frm.reload_doc();
-						},
-					})
-			);
 		},
 	});
 

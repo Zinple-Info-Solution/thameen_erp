@@ -10,10 +10,10 @@ bought for.
 That makes it an "Own Warehouse" supply-source trip like any other — sourced
 from wherever the receipt put the stock — not "Direct from Supplier" (that
 variant receives straight onto the truck at Loading, which would double the
-receipt this module's whole point is to record early). Direct-from-Supplier
-still exists elsewhere in the app, for the opposite situation: a Sales Order
-comes up short and dispatch buys and collects in one motion — see
-`switch_to_direct_supply` in overrides.procurement.
+receipt this module's whole point is to record early). A Direct-from-Supplier
+trip is still set up by hand on the Delivery Trip form (Trip Route: Supplier
+to Customer / Supplier to Decide After Loading) — there is no longer an
+automatic shortcut from a stock shortfall onto that route.
 
 Pending qty is scoped to ONE receipt, not the whole Purchase Order: received
 minus whatever open trips already carry `custom_purchase_receipt` = this
@@ -87,6 +87,25 @@ def pending_receipt_lines(pr):
 	return lines
 
 
+def _traced_sales_order(pr):
+	"""If this receipt exists because a Sales Order came up short — bought
+	through 'Create Purchase Order for Shortfall' on the trip that was short —
+	trace back to that order: Purchase Receipt row -> its Purchase Order ->
+	`custom_delivery_trip` (set by `make_purchase_order` in
+	overrides.procurement) -> that trip's `custom_sales_order`.
+
+	None when the receipt covers more than one Purchase Order, or that order
+	was not raised from a trip shortfall — an ordinary restock purchase,
+	which is not yet sold to anyone in particular.
+	"""
+	po_names = {row.purchase_order for row in pr.items if row.get("purchase_order")}
+	if len(po_names) != 1:
+		return None
+
+	trip = frappe.db.get_value("Purchase Order", po_names.pop(), "custom_delivery_trip")
+	return frappe.db.get_value("Delivery Trip", trip, "custom_sales_order") if trip else None
+
+
 @frappe.whitelist()
 def preview_receipt_trips(purchase_receipt):
 	pr = frappe.get_doc("Purchase Receipt", purchase_receipt)
@@ -103,6 +122,7 @@ def preview_receipt_trips(purchase_receipt):
 		"supplier": pr.supplier,
 		"company": pr.company,
 		"lines": lines,
+		"sales_order": _traced_sales_order(pr),
 		"vehicles": list_vehicles_for_planning(
 			items=[row.get("item_code") for row in lines if row.get("item_code")]
 		),
@@ -116,14 +136,21 @@ def preview_receipt_trips(purchase_receipt):
 
 
 @frappe.whitelist()
-def create_trips_from_receipt(purchase_receipt, sales_order, plan, delivery_location=None, transportation_charge=None):
+def create_trips_from_receipt(purchase_receipt, sales_order=None, plan=None, delivery_location=None, transportation_charge=None):
 	"""One draft Delivery Trip per plan row, sourced from an already-received
-	Purchase Receipt and sold against a Sales Order.
+	Purchase Receipt.
 
 	Always "Own Warehouse" supply source: the cement is already sitting in
 	whichever warehouse the receipt put it in, so Loading is a plain Material
 	Transfer — the same mechanism a Sales-Order-planned trip already uses —
 	not a second Purchase Receipt.
+
+	`sales_order` is optional. Given, the rows are matched against that
+	order's own pending lines (their rate, not the receipt's), the same way
+	the Sales Order planner itself works. Left blank — dispatch does not yet
+	know who this is going to — the trip is still created, in Draft, priced
+	off the receipt; the Sales Order can be set later directly on the trip,
+	before it is submitted.
 
 	plan = [{item_code, qty (stock UOM), vehicle?, driver?, departure_time?}]
 	"""
@@ -132,8 +159,6 @@ def create_trips_from_receipt(purchase_receipt, sales_order, plan, delivery_loca
 	pr = frappe.get_doc("Purchase Receipt", purchase_receipt)
 	if pr.docstatus != 1:
 		frappe.throw(_("Submit the Purchase Receipt first."))
-	if not sales_order:
-		frappe.throw(_("Choose the Sales Order this cement is sold against."))
 
 	if isinstance(plan, str):
 		plan = json.loads(plan or "[]")
@@ -141,11 +166,15 @@ def create_trips_from_receipt(purchase_receipt, sales_order, plan, delivery_loca
 	if not plan:
 		frappe.throw(_("Nothing to plan — every row is zero."))
 
-	so_pool = _sales_order_pool(sales_order)
-	delivery_location = delivery_location or frappe.db.get_value(
-		"Sales Order", sales_order, "custom_delivery_location"
-	)
-	customer = frappe.db.get_value("Sales Order", sales_order, "customer")
+	if sales_order:
+		so_pool = _sales_order_pool(sales_order)
+		delivery_location = delivery_location or frappe.db.get_value(
+			"Sales Order", sales_order, "custom_delivery_location"
+		)
+		customer = frappe.db.get_value("Sales Order", sales_order, "customer")
+	else:
+		so_pool = {}
+		customer = None
 
 	# Never place more than this receipt actually put in the warehouse.
 	pending = {line["item_code"]: line for line in pending_receipt_lines(pr)}
@@ -174,15 +203,18 @@ def create_trips_from_receipt(purchase_receipt, sales_order, plan, delivery_loca
 		trip = frappe.new_doc("Delivery Trip")
 		trip.company = pr.company
 		trip.departure_time = _departure(p.get("departure_time"), pr.posting_date)
-		if trip.meta.has_field("sales_order"):
-			trip.sales_order = sales_order
-		if trip.meta.has_field("customer"):
-			trip.customer = customer
+		if sales_order:
+			if trip.meta.has_field("sales_order"):
+				trip.sales_order = sales_order
+			if trip.meta.has_field("customer"):
+				trip.customer = customer
+			trip.custom_sales_order = sales_order
+		else:
+			trip.flags.ignore_mandatory = True
 		trip.custom_trip_type = "Company Vehicle"
 		trip.custom_supply_source = "Own Warehouse"
 		trip.custom_purchase_receipt = pr.name
 		trip.custom_destination_type = "Customer"
-		trip.custom_sales_order = sales_order
 		trip.custom_delivery_location = delivery_location
 		trip.custom_loading_warehouse = line["warehouse"]
 		if transportation_charge is not None and flt(transportation_charge) > 0:
@@ -207,17 +239,24 @@ def create_trips_from_receipt(purchase_receipt, sales_order, plan, delivery_loca
 			"delivery_location": delivery_location,
 		}
 
-		so_rows = _take_from_so_pool(so_pool, line["item_code"], flt(p["qty"]), sales_order)
-		for so_row, take_stock in so_rows:
+		if sales_order:
+			so_rows = _take_from_so_pool(so_pool, line["item_code"], flt(p["qty"]), sales_order)
+			for so_row, take_stock in so_rows:
+				piece = dict(row)
+				piece.update(
+					{
+						"sales_order": sales_order,
+						"so_detail": so_row["name"],
+						"qty": take_stock / factor,
+						"rate": flt(so_row["rate"]),
+					}
+				)
+				trip.append("custom_trip_items", piece)
+		else:
+			# No order to match against yet — priced off the receipt itself,
+			# same as the row would show on the receipt's own Items table.
 			piece = dict(row)
-			piece.update(
-				{
-					"sales_order": sales_order,
-					"so_detail": so_row["name"],
-					"qty": take_stock / factor,
-					"rate": flt(so_row["rate"]),
-				}
-			)
+			piece.update({"qty": flt(p["qty"]) / factor, "rate": flt(line["rate"])})
 			trip.append("custom_trip_items", piece)
 
 		trip.flags.thameen_splitting = True
@@ -225,10 +264,10 @@ def create_trips_from_receipt(purchase_receipt, sales_order, plan, delivery_loca
 		created.append(trip.name)
 
 	frappe.msgprint(
-		_("{0} trip(s) planned from {1}, direct to {2}: {3}").format(
+		_("{0} trip(s) planned from {1}{2}: {3}").format(
 			len(created),
 			get_link_to_form("Purchase Receipt", pr.name),
-			customer,
+			_(", direct to {0}").format(customer) if customer else "",
 			", ".join(get_link_to_form("Delivery Trip", name) for name in created),
 		),
 		indicator="green",

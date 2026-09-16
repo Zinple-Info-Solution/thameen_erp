@@ -1,4 +1,5 @@
-// Shared trip planner table used by the Sales Order and Purchase Order dialogs.
+// Shared trip planner table used by the Sales Order and Purchase Receipt
+// dialogs.
 //
 //   thameen.trip_planner.render(dialog, {
 //       plan:      [{key, item_code, qty, vehicle, driver, departure_time, label?}],
@@ -13,18 +14,24 @@
 // Date and Time columns are two plain inputs over the same value, split and
 // rejoined by `_split_dt` on every edit.
 //
-// One rule holds while the dialog is open: per line, the quantities across
-// all rows never exceed what the order still owes — typing a bigger number,
-// or picking a truck that defaults a row higher, is clamped and the excess
-// pulled back off the last sibling row of that line, not accepted silently.
+// Two ceilings apply to every row's qty, and they behave differently:
 //
-// Choosing a truck defaults the row's qty to whatever of THIS item already
-// sits on that truck — dispatch is telling the trip what is really there,
-// not guessing at how much more room is free. An empty truck carries no such
-// signal and leaves the qty exactly as typed. Capacity is never used to size
-// a row automatically any more; it only ever produces the "over by" warning,
-// left for the dispatcher to resolve by hand (smaller qty, bigger truck, or
-// Split Into Trips).
+//   - The line's own total: never claim more of a line than the order still
+//     owes. Typing a bigger number, or picking a truck that would push a row
+//     higher, is clamped and the excess pulled back off the last sibling row
+//     of that line — nothing about the order changed, so nothing is created.
+//   - A vehicle's rated capacity: a truck cannot carry more than it is rated
+//     for, whether picked from the dropdown or typed straight into the qty
+//     box. Unlike the line ceiling, this excess IS still qty the order
+//     needs — it opens a fresh row (or feeds one already waiting for a
+//     truck) instead of vanishing.
+//
+// Choosing a truck also defaults the row's qty down to whatever of THIS item
+// already sits on that truck, when that is less than what was planned —
+// dispatch is telling the trip what is really there, not guessing at how
+// much more room is free. An empty truck carries no such signal and leaves
+// the qty exactly as it was. Either way, the same row spawns for whatever
+// the truck can't cover.
 
 frappe.provide("thameen.trip_planner");
 
@@ -213,50 +220,6 @@ thameen.trip_planner.collect = function (dialog) {
 		}));
 };
 
-thameen.trip_planner.auto_split = function (dialog, vehicle, start_date, days_between) {
-	// Rewrite the plan: every key split by what this truck can actually take,
-	// one trip per day.
-	const o = dialog.planner;
-	const v = o.vehicles.find((x) => x.name === vehicle);
-	if (!v || flt(v.capacity) <= 0) {
-		frappe.msgprint(__("Set a Capacity on {0} before planning by it.", [vehicle]));
-		return;
-	}
-
-	// Free space, not rated capacity. A truck rated 20 carrying 15 can take 5,
-	// and planning 20 into it just moves the overflow to load time.
-	const per_trip = flt(v.free !== undefined ? v.free : v.available);
-	if (per_trip <= 0.001) {
-		frappe.msgprint({
-			title: __("No Room on Truck"),
-			indicator: "orange",
-			message: __(
-				"{0} has no free space — rated {1}, {2} already on it or promised to other trips. Unload it or pick another truck.",
-				[vehicle, format_number(v.capacity), format_number(Math.max(flt(v.on_truck), flt(v.committed)))]
-			),
-		});
-		return;
-	}
-
-	const totals = {};
-	o.plan.forEach((p) => (totals[p.key] = flt(totals[p.key]) + flt(p.qty)));
-	const template = {};
-	o.plan.forEach((p) => (template[p.key] = p));
-	const out = [];
-	let date = start_date || frappe.datetime.get_today();
-	Object.keys(totals).forEach((key) => {
-		let left = totals[key];
-		while (left > 0.001) {
-			const take = Math.min(left, per_trip);
-			out.push({ ...template[key], qty: take, vehicle, driver: v.driver || null, departure_time: date });
-			left -= take;
-			date = frappe.datetime.add_days(date, days_between || 1);
-		}
-	});
-	o.plan = out;
-	thameen.trip_planner._draw(dialog);
-};
-
 thameen.trip_planner._draw = function (dialog) {
 	const o = dialog.planner;
 	const wrapper = dialog.fields_dict.plan.$wrapper;
@@ -341,7 +304,7 @@ thameen.trip_planner._draw = function (dialog) {
 		const available = qty > 0 ? format_number(qty) : `<span class="text-muted">${__("empty")}</span>`;
 		return (
 			`<span class="small">${__("cap")} <b>${format_number(v.capacity)}</b> · ` +
-			`${__("available")} <b>${available}</b></span>`
+			`${__("available qty")} <b>${available}</b></span>`
 		);
 	};
 
@@ -387,12 +350,11 @@ thameen.trip_planner._draw = function (dialog) {
 			<span class="small text-muted">${__("{0} trip(s)", [plan.length])}</span>
 			<span>
 				<button class="btn btn-xs btn-default tp-add">${__("+ Add trip")}</button>
-				<button class="btn btn-xs btn-default tp-same ml-1">${__("Same truck for all, one day apart")}</button>
 			</span>
 		</div>
 		<table class="table table-bordered small">
 			<thead><tr>
-				<th style="width:4%">#</th><th style="width:16%">${__("Line")}</th><th style="width:10%">${__("Qty")}</th>
+				<th style="width:4%">${__("No")}</th><th style="width:16%">${__("Line")}</th><th style="width:10%">${__("Qty")}</th>
 				<th>${__("Vehicle")}</th><th style="width:12%">${__("Available stock")}</th>
 				<th>${__("Driver")}</th>
 				<th style="width:11%">${__("Date")}</th><th style="width:9%">${__("Time")}</th><th style="width:6%"></th>
@@ -450,29 +412,6 @@ thameen.trip_planner._draw = function (dialog) {
 		const last = plan[plan.length - 1];
 		if (!last) return;
 		plan.push({ ...last, qty: 0, departure_time: frappe.datetime.add_days(last.departure_time || frappe.datetime.get_today(), 1) });
-		thameen.trip_planner._draw(dialog);
-	});
-	wrapper.find(".tp-same").on("click", () => {
-		const v = (o.same_truck && o.same_truck()) || (plan[0] && plan[0].vehicle);
-		if (!v) {
-			frappe.msgprint(__("Choose a truck first."));
-			return;
-		}
-		// No shared date field to fall back on any more — start from whatever
-		// date is already sitting on the first row (itself just an ordinary,
-		// independently editable Date input, same as every other row's).
-		const base =
-			(o.start_date && o.start_date()) ||
-			thameen.trip_planner._split_dt(plan[0] && plan[0].departure_time).date ||
-			frappe.datetime.get_today();
-		const step = (o.days_between && o.days_between()) || 1;
-		const vv = (o.vehicles || []).find((x) => x.name === v);
-		plan.forEach((p, i) => {
-			p.vehicle = v;
-			if (!p.driver_manual) p.driver = (vv && vv.driver) || null;
-			const time = thameen.trip_planner._split_dt(p.departure_time).time;
-			p.departure_time = `${frappe.datetime.add_days(base, i * step)} ${time}:00`;
-		});
 		thameen.trip_planner._draw(dialog);
 	});
 };

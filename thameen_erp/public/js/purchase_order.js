@@ -1,6 +1,6 @@
 // Purchase Order — just a view link to whatever Delivery Trip is already
-// attached (set by `switch_to_direct_supply` when a Sales Order runs short
-// and dispatch buys and collects in one motion).
+// attached to it (a Direct-from-Supplier trip set up by hand on the trip's
+// own Trip Route field points its Purchase Order button back here).
 //
 // Planning a trip off cement bought here happens later, once the goods are
 // actually received — see purchase_receipt.js. Receiving first keeps stock

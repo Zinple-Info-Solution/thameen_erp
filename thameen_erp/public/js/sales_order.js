@@ -14,9 +14,49 @@ frappe.ui.form.on("Sales Order", {
 			__("Create")
 		).addClass("btn-primary");
 
+		hide_other_so_create_buttons(frm);
 		show_trip_summary(frm);
 	},
 });
+
+// Cement moves through one path — a Delivery Trip — so the Create menu's
+// standard Sales Invoice / Delivery Note / Purchase Order / Material Request
+// and the rest never apply here and only get in the way.
+//
+// Core's own controller registers "refresh" the old (cscript) way, and
+// Frappe's script_manager runs every new-style `frappe.ui.form.on` handler
+// (ours) BEFORE any old-style one — so on the very first refresh, core has
+// not added its Create-menu buttons yet and there is nothing here to remove.
+// Hunting by data-label straight off `inner_toolbar`, repeated a few times
+// after that first pass, catches them once core actually adds them, without
+// depending on exactly which group wraps them or how it renders once ours is
+// the primary button in that group.
+//
+// Named and scoped to this file only (not shared with purchase_receipt.js's
+// near-identical helper): Frappe keeps doctype_js files loaded once fetched,
+// so visiting both a Sales Order and a Purchase Receipt in one session would
+// otherwise redeclare the same top-level const/function twice and break both.
+const SO_OTHER_CREATE_BUTTONS = [
+	"Pick List", "Delivery Note", "Work Order", "Sales Invoice",
+	"Material Request", "Request for Raw Materials", "Purchase Order",
+	"Maintenance Visit", "Maintenance Schedule", "Project",
+	"Payment Request", "Payment",
+	"Internal Purchase Order", "Inter Company Purchase Order",
+];
+
+function hide_other_so_create_buttons(frm) {
+	const remove = () => {
+		if (!frm.page.inner_toolbar) return;
+		SO_OTHER_CREATE_BUTTONS.forEach((label) => {
+			frm.page.inner_toolbar.find(`[data-label="${encodeURIComponent(__(label))}"]`).remove();
+		});
+		frm.page.inner_toolbar.find(".inner-group-button").each(function () {
+			if (!$(this).find(".dropdown-item").length) $(this).remove();
+		});
+	};
+	remove();
+	[300, 800, 1500].forEach((ms) => setTimeout(remove, ms));
+}
 
 // Company-wide stock against what this order still owes, checked the moment
 // the order is opened — catching a shortfall here is far cheaper than
@@ -103,10 +143,13 @@ function open_so_planner(frm, data) {
 	const limits = {};
 	const plan = data.plan.map((p) => {
 		const key = `${p.delivery_location || ""}::${p.item_code}`;
-		limits[key] = { label: `${p.item_code} @ ${p.delivery_location || __("(order default)")}`, max: flt(p.qty) };
+		limits[key] = {
+			label: p.delivery_location ? `${p.item_code} @ ${p.delivery_location}` : p.item_code,
+			max: flt(p.qty),
+		};
 		return {
 			key, item_code: p.item_code, qty: flt(p.qty), vehicle: null, driver: null,
-			label: `${p.item_code} → ${p.delivery_location || __("(order default)")}`,
+			label: p.delivery_location ? `${p.item_code} → ${p.delivery_location}` : p.item_code,
 			departure_time: data.departure_time || frappe.datetime.get_today(),
 			extra: { delivery_location: p.delivery_location || null },
 		};

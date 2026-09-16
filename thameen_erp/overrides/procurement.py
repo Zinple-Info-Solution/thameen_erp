@@ -320,24 +320,6 @@ def make_material_request(trip, rows=None):
 	return mr.name
 
 
-@frappe.whitelist()
-def switch_to_direct_supply(trip, supplier=None):
-	"""Turn an own-warehouse trip into a direct-from-supplier one and raise the PO."""
-	doc = frappe.get_doc("Delivery Trip", trip)
-	frappe.has_permission("Delivery Trip", "write", doc=doc, throw=True)
-	if doc.docstatus != 0:
-		frappe.throw(_("Only a draft trip can be switched to direct supply."))
-
-	supplier = supplier or frappe.db.get_single_value("Thameen Fleet Settings", "default_cement_supplier")
-	if not supplier:
-		frappe.throw(_("Choose a Supplier."))
-
-	doc.custom_supply_source = DIRECT
-	doc.custom_supplier = supplier
-	doc.save()
-	return make_purchase_order(trip, supplier=supplier, mode="direct")
-
-
 # ---------------------------------------------------------------------------
 # Direct supply: receiving onto the truck at Loading
 # ---------------------------------------------------------------------------
