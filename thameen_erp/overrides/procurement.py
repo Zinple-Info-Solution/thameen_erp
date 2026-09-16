@@ -1,12 +1,21 @@
 """When the yard does not have the cement: buy it, or have the supplier deliver.
 
-Two paths, chosen on the Delivery Trip.
+Two paths, chosen on the Delivery Trip — plus a variant of the first that
+turns into the second partway through.
 
 1. Shortfall purchase (Supply Source = Own Warehouse)
    The trip still loads from the yard, but the yard is short. The dispatcher is
    shown exactly how short, per item, and can raise a Purchase Order (or a
-   Material Request for the buyer to action) for the shortfall into the loading
-   warehouse. Once the Purchase Receipt lands, the trip loads as normal.
+   Material Request for the buyer to action) for the shortfall — into the
+   trip's own vehicle warehouse when one is already assigned, the loading
+   warehouse otherwise (`make_purchase_order`, `_vehicle_warehouse_or_loading`).
+
+   Received into the yard, the trip just loads as normal. Received straight
+   onto the vehicle warehouse instead, `link_shortfall_receipt_to_trip` below
+   notices on submit, links the receipt to the trip, and flips its route to
+   Supplier to Customer — the trip becomes path 2 from here on, and Loading
+   finds the stock already there instead of raising a Material Transfer from
+   a yard that was never actually used.
 
 2. Direct from Supplier (Supply Source = Direct from Supplier)
    The truck collects at the supplier's plant and drives straight to the
@@ -160,7 +169,9 @@ def make_purchase_order(trip, supplier=None, rows=None, mode="shortfall", schedu
 	"""Draft Purchase Order from a trip.
 
 	mode = "shortfall"  one line per short row, qty = shortfall, into the
-	                    loading warehouse. Used when the yard is short.
+	                    trip's own vehicle warehouse (or the loading warehouse
+	                    if no vehicle is assigned yet). Used when the yard is
+	                    short.
 	mode = "direct"     one line per trip row, full planned qty, flagged for
 	                    collection by the truck. Used for direct supply.
 
@@ -203,6 +214,12 @@ def make_purchase_order(trip, supplier=None, rows=None, mode="shortfall", schedu
 	else:
 		check = check_trip_stock(trip)
 		wanted = {r.get("idx") for r in (rows or [])} if rows else None
+		# Straight onto the truck's own warehouse when it has one — the buyer
+		# then makes the Purchase Receipt against that same warehouse, and
+		# `link_shortfall_receipt_to_trip` picks it up on submit and links it
+		# back to this trip, same as a direct-supply PO already does. Only
+		# falls back to the loading warehouse when no vehicle is assigned yet.
+		warehouse = _vehicle_warehouse_or_loading(doc)
 		lines = [
 			{
 				"row_name": None,
@@ -210,7 +227,7 @@ def make_purchase_order(trip, supplier=None, rows=None, mode="shortfall", schedu
 				"qty": flt(r["shortfall"]) / (flt(r["conversion_factor"]) or 1),
 				"uom": r["uom"],
 				"conversion_factor": flt(r["conversion_factor"]) or 1,
-				"warehouse": r["source_warehouse"],
+				"warehouse": warehouse,
 			}
 			for r in check["shortfalls"]
 			if not wanted or r["idx"] in wanted
@@ -434,6 +451,145 @@ def receive_onto_vehicle(trip_doc):
 	return pr.name
 
 
+def link_shortfall_receipt_to_trip(doc, method=None):
+	"""A third path onto Direct-from-Supplier, alongside `receive_onto_vehicle`
+	and `make_purchase_order` above: dispatch buys the shortfall into the
+	yard as usual (mode="shortfall"), but the buyer receives it straight onto
+	the truck's own warehouse instead — an ordinary Purchase Receipt, just
+	pointed at the vehicle warehouse rather than the yard.
+
+	That single choice of warehouse is the trigger. When it fires: the trip
+	that raised the Purchase Order this receipt is against gets the receipt
+	linked, and its route flips to Supplier to Customer — same destination,
+	but Loading now finds this receipt already sitting there (see
+	`receive_onto_vehicle`, which is idempotent) instead of raising a
+	Material Transfer from a yard that was never actually used.
+
+	Ordinary restocks are never touched: this only fires when the Purchase
+	Order traces back to a trip at all, which only ever happens for a
+	shortfall purchase or a direct-supply one — never a plain restock PO with
+	no Delivery Trip behind it.
+
+	The Sales Order on the trip is left exactly as it is, deliberately not
+	re-derived here the way `redirect_trip`'s Customer branch does: that
+	function exists for a trip with NO Sales Order yet (Decide After
+	Loading). This one only ever fires on a trip planned from a Sales Order
+	in the first place — its header `custom_sales_order` and every row's
+	`sales_order` / `so_detail` / `rate` were set back when the trip was
+	created, and are correct already. Re-running that allocation here would
+	claim the order's pending qty a second time for stock the trip already
+	owns.
+
+	Not a substitute for `_validate_po_pending_qty`, which this path cannot
+	use — these rows carry no `po_detail` (only `make_purchase_order`'s
+	`mode="direct"` stamps that). The qty check below is this path's own,
+	looser version of the same guard: a warning, not a hard block, since a
+	trip legitimately split across more than one receipt is not an error.
+	"""
+	warehouses = {row.warehouse for row in doc.items if row.warehouse}
+	if not warehouses:
+		return
+
+	vehicle_warehouses = set(
+		frappe.get_all(
+			"Warehouse",
+			filters={"name": ("in", list(warehouses)), "custom_is_vehicle_warehouse": 1},
+			pluck="name",
+		)
+	)
+	vehicle_rows = [row for row in doc.items if row.warehouse in vehicle_warehouses]
+	if not vehicle_rows:
+		return
+
+	# The PO is traced from the vehicle-warehouse rows specifically, not the
+	# whole receipt — a receipt can mix a vehicle-warehouse row with an
+	# ordinary yard row for an unrelated PO, and that unrelated PO must never
+	# decide which trip this one links to.
+	po_names = {row.purchase_order for row in vehicle_rows if row.get("purchase_order")}
+	if len(po_names) != 1:
+		if po_names:
+			frappe.msgprint(
+				_("This receipt's vehicle-warehouse rows span more than one Purchase Order, so no "
+				  "Delivery Trip could be linked automatically. Link it by hand on the trip if one applies."),
+				indicator="orange",
+				title=_("Not Linked"),
+			)
+		return
+
+	po_name = po_names.pop()
+	po_supplier, trip_name = frappe.db.get_value("Purchase Order", po_name, ["supplier", "custom_delivery_trip"])
+	if not trip_name:
+		return
+
+	trip = frappe.get_doc("Delivery Trip", trip_name)
+
+	# Already Direct-from-Supplier — this receipt is the one `load_vehicle` /
+	# `receive_onto_vehicle` itself just raised and submitted for that trip,
+	# not a new shortfall being redirected. Nothing left to flip; let that
+	# function's own message stand alone instead of printing a second one.
+	if trip.custom_supply_source == DIRECT:
+		return
+
+	if trip.custom_purchase_receipt and trip.custom_purchase_receipt != doc.name:
+		frappe.msgprint(
+			_("{0} is already linked to Purchase Receipt {1}. {2} was not linked over it — check "
+			  "both receipts cover this trip correctly.").format(
+				get_link_to_form("Delivery Trip", trip_name), trip.custom_purchase_receipt, doc.name
+			),
+			indicator="orange",
+			title=_("Already Linked"),
+		)
+		return
+
+	vehicle_warehouse = vehicle_rows[0].warehouse
+
+	# Set here, not left for the trip's own `_fill_supplier_from_po_or_receipt`
+	# to catch on its next save: that only runs inside validate(), and this
+	# write bypasses it entirely, same as every other field set above. Left
+	# to validate(), the Supplier field would sit blank — and any dialog that
+	# offers to raise a second Purchase Order for a further shortfall would
+	# have nothing to default it to — until someone happens to save the trip.
+	trip_updates = {
+		"custom_purchase_receipt": doc.name,
+		"custom_supply_source": DIRECT,
+		"custom_destination_type": "Customer",
+		"custom_trip_route": "Supplier to Customer",
+	}
+	if not trip.custom_supplier:
+		trip_updates["custom_supplier"] = po_supplier
+	if not trip.custom_supplier_warehouse:
+		supplier_warehouse = frappe.db.get_value("Supplier", po_supplier, "custom_default_warehouse")
+		if supplier_warehouse:
+			trip_updates["custom_supplier_warehouse"] = supplier_warehouse
+
+	frappe.db.set_value("Delivery Trip", trip_name, trip_updates, update_modified=False)
+	frappe.db.set_value("Purchase Receipt", doc.name, "custom_delivery_trip", trip_name, update_modified=False)
+
+	# This path skips `_validate_po_pending_qty` (no `po_detail` to check) and,
+	# once the trip is Direct-from-Supplier, `_validate_stock_available` too
+	# (that check exempts this supply source outright) — so nothing else will
+	# ever tell the dispatcher if this receipt came up short. A plain qty
+	# comparison, by item, is the only guard left standing.
+	received = {}
+	for row in vehicle_rows:
+		received[row.item_code] = flt(received.get(row.item_code)) + flt(row.qty) * (flt(row.conversion_factor) or 1)
+
+	short = []
+	for row in trip.get("custom_trip_items") or []:
+		needed = flt(row.qty) * (flt(row.conversion_factor) or 1)
+		have = flt(received.get(row.item_code))
+		if needed > have + QTY_TOLERANCE:
+			short.append(_("{0}: trip needs {1}, this receipt brought {2}").format(row.item_code, needed, have))
+
+	message = _("Stock updated on {0}. Linked to {1} — Trip Route set to Supplier to Customer.").format(
+		vehicle_warehouse, get_link_to_form("Delivery Trip", trip_name)
+	)
+	if short:
+		message += "<br><br>" + _("This receipt does not cover the whole trip:") + "<br>" + "<br>".join(short)
+
+	frappe.msgprint(message, indicator="orange" if short else "green", title=_("Stock Updated"))
+
+
 def purchase_receipt_on_cancel(doc, method=None):
 	"""The receipt that put the cement on the truck is gone — so is the link."""
 	trip = doc.get("custom_delivery_trip")
@@ -551,8 +707,11 @@ def _bin_qty(item_code, warehouse):
 
 
 def _vehicle_warehouse_or_loading(doc):
-	"""PO warehouse for a direct trip. The receipt overrides it with the
-	truck's warehouse at Loading, so this is only a placeholder ERPNext needs."""
+	"""PO warehouse for a trip's shortfall or direct-supply purchase alike —
+	the truck's own warehouse when one is assigned, so the Purchase Receipt
+	the buyer makes from it defaults straight onto the vehicle. Falls back to
+	the loading warehouse (or a generic yard) only when no vehicle is picked
+	yet, in which case the buyer sets the real warehouse by hand later."""
 	if doc.get("vehicle"):
 		wh = frappe.db.get_value("Vehicle", doc.vehicle, "custom_vehicle_warehouse")
 		if wh:

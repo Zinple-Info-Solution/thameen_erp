@@ -387,6 +387,22 @@ def get_custom_fields() -> dict:
 			},
 		],
 		# ------------------------------------------------------------------
+		# Supplier (ERPNext standard). One warehouse per supplier — the yard
+		# at their plant a truck collects from on a direct-supply trip. Feeds
+		# Delivery Trip.custom_supplier_warehouse below via fetch_from, so
+		# picking the Supplier fills it in instead of asking twice.
+		# ------------------------------------------------------------------
+		"Supplier": [
+			{
+				"fieldname": "custom_default_warehouse",
+				"label": "Supplier Warehouse",
+				"fieldtype": "Link",
+				"options": "Warehouse",
+				"description": "Yard at this supplier's plant a truck collects from on a direct-supply trip.",
+				"insert_after": "supplier_group",
+			},
+		],
+		# ------------------------------------------------------------------
 		# Delivery Trip (ERPNext standard, submittable) used as the Trip Sheet.
 		# ------------------------------------------------------------------
 		"Delivery Trip": [
@@ -563,7 +579,8 @@ def get_custom_fields() -> dict:
 				"fieldtype": "Link",
 				"options": "Warehouse",
 				"depends_on": "eval:doc.custom_supply_source=='Direct from Supplier'",
-				"description": "Yard at the supplier the truck collects from.",
+				"description": "Yard at the supplier the truck collects from. Filled in from the Supplier — override here if this trip collects somewhere else.",
+				"fetch_from": "custom_supplier.custom_default_warehouse",
 				"insert_after": "custom_target_warehouse",
 			},
 			{
@@ -1281,6 +1298,11 @@ def _apply_property_setters():
 				"calculate_arrival_time",
 				"optimize_route",
 				"total_distance",
+				"custom_trip_start",
+				"custom_trip_end",
+				"custom_trip_duration_hours",
+				"custom_transportation_cost",
+				"custom_transportation_item",
 			)
 		],
 		# ------------------------------------------------------------------

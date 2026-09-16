@@ -100,6 +100,7 @@ class ThameenDeliveryTrip(DeliveryTrip):
 		self._validate_vehicle_item_conflict()
 		self._validate_stock_available()
 		self._validate_transport_type()
+		self._fill_supplier_from_po_or_receipt()
 		self._validate_supply_source()
 		self._validate_destination()
 		self._set_trip_source()
@@ -685,6 +686,37 @@ class ThameenDeliveryTrip(DeliveryTrip):
 			"custom_external_transporter"
 		):
 			frappe.throw(_("Select the External Transporter for an external transport trip."))
+
+	def _fill_supplier_from_po_or_receipt(self):
+		"""A direct-from-supplier trip needs a Supplier, but by the time its
+		Purchase Order exists (`make_purchase_order`) — or, for a shortfall
+		received straight onto the vehicle, its Purchase Receipt
+		(`link_shortfall_receipt_to_trip`) — that supplier is already known.
+		Fill it in instead of asking again. PO first: it is set the moment
+		the order is raised, before any receipt exists; the receipt is the
+		fallback for a trip that only ever got that far.
+
+		Only when blank — a supplier already chosen by hand, or the one this
+		belongs to after a supplier switch, is never overwritten here.
+
+		The Supplier Warehouse field's own `fetch_from` (custom_supplier ->
+		Supplier.custom_default_warehouse) is a client/save-time mechanism —
+		it will not necessarily see a value THIS SAME validate() just
+		assigned, so it is filled in directly here too rather than left to
+		chance on whether that fetch re-runs against a value that did not
+		exist when the form was last loaded.
+		"""
+		if self.get("custom_supplier"):
+			return
+		if self.get("custom_purchase_order"):
+			self.custom_supplier = frappe.db.get_value("Purchase Order", self.custom_purchase_order, "supplier")
+		elif self.get("custom_purchase_receipt"):
+			self.custom_supplier = frappe.db.get_value("Purchase Receipt", self.custom_purchase_receipt, "supplier")
+
+		if self.custom_supplier and not self.get("custom_supplier_warehouse"):
+			self.custom_supplier_warehouse = frappe.db.get_value(
+				"Supplier", self.custom_supplier, "custom_default_warehouse"
+			)
 
 	def _validate_one_item_per_trip(self):
 		"""A bulk tanker carries one cement type. With the setting on, a trip

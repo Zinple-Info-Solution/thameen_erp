@@ -99,6 +99,7 @@ doc_events = {
 	# Direct-from-supplier trips: keep the trip's receipt/order links honest
 	# when purchasing cancels something underneath them.
 	"Purchase Receipt": {
+		"on_submit": "thameen_erp.overrides.procurement.link_shortfall_receipt_to_trip",
 		"on_cancel": "thameen_erp.overrides.procurement.purchase_receipt_on_cancel",
 		"validate": "thameen_erp.overrides.vehicle_stock.validate_vehicle_warehouse_capacity",
 	},

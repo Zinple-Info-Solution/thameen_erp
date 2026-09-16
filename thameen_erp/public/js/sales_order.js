@@ -1,11 +1,6 @@
 frappe.ui.form.on("Sales Order", {
 	refresh(frm) {
 		if (["Closed", "Cancelled"].includes(frm.doc.status)) return;
-
-		// Raised regardless of docstatus — a promise the yard cannot keep is
-		// worth flagging while the order is still a draft, not just after.
-		check_stock_coverage(frm);
-
 		if (frm.doc.docstatus !== 1) return;
 
 		frm.add_custom_button(
@@ -61,36 +56,6 @@ function hide_other_so_create_buttons(frm) {
 // Company-wide stock against what this order still owes, checked the moment
 // the order is opened — catching a shortfall here is far cheaper than
 // catching it when a Delivery Trip refuses to submit later.
-function check_stock_coverage(frm) {
-	if (frm.is_new() || !(frm.doc.items || []).length) return;
-
-	frappe.call({
-		method: "thameen_erp.overrides.sales_order.check_stock_coverage",
-		args: { sales_order: frm.doc.name },
-		callback({ message }) {
-			if (!message || !message.short || !message.short.length) return;
-
-			const lines = message.short
-				.map((r) =>
-					__("{0}: needs {1}, only {2} available company-wide ({3} short)", [
-						frappe.utils.escape_html(r.item_name),
-						format_number(r.needed),
-						format_number(r.available),
-						format_number(r.short),
-					])
-				)
-				.join("<br>");
-
-			frm.dashboard.set_headline_alert(
-				`<div class="row"><div class="col-sm-12">` +
-					`<b>${__("Not enough stock company-wide to fully deliver this order")}</b><br>${lines}` +
-					`</div></div>`,
-				"red"
-			);
-		},
-	});
-}
-
 function plan_trips(frm) {
 	frappe.call({
 		method: "thameen_erp.overrides.sales_order.preview_trip_plan",

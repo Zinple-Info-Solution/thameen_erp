@@ -14,10 +14,49 @@ frappe.ui.form.on("Purchase Receipt", {
 		}
 		if (frm.doc.docstatus !== 1) return;
 
-		frm.add_custom_button(__("Delivery Trips"), () => open_receipt_planner(frm), __("Create")).addClass("btn-primary");
 		hide_other_receipt_create_buttons(frm);
+		add_delivery_trips_button_unless_vehicle_warehouse(frm);
+	},
+
+	// `link_shortfall_receipt_to_trip` (overrides.procurement) links the trip
+	// server-side, inside this same submit, via a raw db write — not part of
+	// the doc this form already has in memory, so a reload is what actually
+	// picks it up before deciding whether to jump there.
+	on_submit(frm) {
+		frm.reload_doc().then(() => {
+			if (frm.doc.custom_delivery_trip) {
+				frappe.set_route("Form", "Delivery Trip", frm.doc.custom_delivery_trip);
+			}
+		});
 	},
 });
+
+// A receipt accepted straight into a vehicle warehouse is filling a specific
+// trip's shortfall — see `link_shortfall_receipt_to_trip` in
+// overrides.procurement, which links that trip automatically on submit.
+// There is nothing new to plan from here in that case; the button only makes
+// sense for an ordinary restock into an ordinary (non-vehicle) warehouse.
+function add_delivery_trips_button_unless_vehicle_warehouse(frm) {
+	const warehouses = Array.from(new Set((frm.doc.items || []).map((r) => r.warehouse).filter(Boolean)));
+	const add_button = () => frm.add_custom_button(__("Delivery Trips"), () => open_receipt_planner(frm), __("Create")).addClass("btn-primary");
+
+	if (!warehouses.length) {
+		add_button();
+		return;
+	}
+	frappe.db
+		.get_list("Warehouse", {
+			filters: { name: ["in", warehouses], custom_is_vehicle_warehouse: 1 },
+			fields: ["name"],
+			limit: 1,
+		})
+		.then((rows) => {
+			if (!rows || !rows.length) add_button();
+		})
+		// A failed lookup must not silently remove the button along with it —
+		// fall back to showing it, same as before this check existed.
+		.catch(() => add_button());
+}
 
 // Only Purchase Invoice, Purchase Return and our own Delivery Trips belong
 // on a cement receipt's Create menu — Landed Cost Voucher, Make Stock Entry

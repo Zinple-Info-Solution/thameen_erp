@@ -178,6 +178,8 @@ frappe.ui.form.on("Delivery Trip", {
 	// error after the dispatcher has already clicked Submit. Check first and,
 	// if short, open the same procurement dialog Check Stock uses, so the
 	// fix is one click away instead of a second trip back to this form.
+	// There is no way to submit past this — insufficient stock always
+	// cancels the submit, whichever way the dialog is closed.
 	// Returning a Promise here makes Frappe wait for it before deciding
 	// whether the submit actually proceeds (see script_manager.trigger).
 	before_submit(frm) {
@@ -195,13 +197,8 @@ frappe.ui.form.on("Delivery Trip", {
 						resolve();
 						return;
 					}
-					offer_procurement(frm, message, {
-						allow_submit_anyway: true,
-						on_settle: (proceeded) => {
-							if (!proceeded) frappe.validated = false;
-							resolve();
-						},
-					});
+					frappe.validated = false;
+					offer_procurement(frm, message, { on_close: resolve });
 				},
 				error: () => resolve(),
 			});
@@ -1594,25 +1591,19 @@ function show_direct_supply_check(frm, check) {
 	d.show();
 }
 
-// `opts.on_settle(proceeded)` is only used by the submit-time gate below: it
-// fires exactly once, however the dialog closes, so a pending Submit can be
-// resumed (or left cancelled) no matter which way the dispatcher leaves this
-// dialog — a procurement action, "Submit Anyway", or just the X button.
-// Every other caller (choosing a vehicle, the Check Stock button, the
-// Loading step) passes no opts and behaves exactly as before.
-//
-// Every button below calls settle() BEFORE dialog.hide(), never after: frappe
-// wires dialog.onhide to Bootstrap's 'hide.bs.modal' event, which Modal.hide()
-// fires synchronously from inside itself. hide() first would let onhide's own
-// settle(false) run first and win the once-only guard — turning "Submit
-// Anyway" into a silent cancel.
+// `opts.on_close()` is only used by the submit-time gate below: it fires
+// exactly once, however the dialog closes (a procurement action or just the
+// X button), so a Submit this dialog always cancels can still resolve its
+// pending promise instead of hanging. Every other caller (choosing a
+// vehicle, the Check Stock button, the Loading step) passes no opts and
+// behaves exactly as before.
 function offer_procurement(frm, check, opts) {
 	opts = opts || {};
-	let settled = false;
-	const settle = (proceeded) => {
-		if (settled) return;
-		settled = true;
-		if (opts.on_settle) opts.on_settle(!!proceeded);
+	let closed = false;
+	const close = () => {
+		if (closed) return;
+		closed = true;
+		if (opts.on_close) opts.on_close();
 	};
 
 	const rows = check.shortfalls
@@ -1654,7 +1645,14 @@ function offer_procurement(frm, check, opts) {
 				fieldtype: "Link",
 				options: "Supplier",
 				label: __("Supplier"),
-				description: __("Blank falls back to the Default Cement Supplier in the settings."),
+				// Same supplier the trip already has (from an earlier PO or
+				// receipt), so a second shortfall on the same trip buys from
+				// the same place by default. Blank only when the trip has
+				// none yet, in which case Default Cement Supplier applies.
+				default: frm.doc.custom_supplier || undefined,
+				description: frm.doc.custom_supplier
+					? undefined
+					: __("Blank falls back to the Default Cement Supplier in the settings."),
 			},
 		],
 		primary_action_label: __("Create Purchase Order for Shortfall"),
@@ -1664,11 +1662,7 @@ function offer_procurement(frm, check, opts) {
 				args: { trip: frm.doc.name, supplier: values.supplier, mode: "shortfall" },
 				freeze: true,
 				callback({ message }) {
-					// settle() before hide(): frappe wires dialog.onhide to Bootstrap's
-					// modal 'hide' event, which fires synchronously inside hide() — so
-					// calling hide() first would let onhide's settle(false) win the
-					// settled-once guard before this line ever ran.
-					settle(false);
+					close();
 					dialog.hide();
 					if (message) frappe.set_route("Form", "Purchase Order", message);
 				},
@@ -1676,7 +1670,7 @@ function offer_procurement(frm, check, opts) {
 		},
 	});
 
-	// A third, quieter option for sites where dispatch does not buy.
+	// A second, quieter option for sites where dispatch does not buy.
 	dialog.$wrapper.find(".modal-footer").prepend(
 		$(`<button class="btn btn-default btn-sm mr-auto">${__("Material Request instead")}</button>`).on("click", () => {
 			frappe.call({
@@ -1684,7 +1678,7 @@ function offer_procurement(frm, check, opts) {
 				args: { trip: frm.doc.name },
 				freeze: true,
 				callback({ message }) {
-					settle(false);
+					close();
 					dialog.hide();
 					if (message) frappe.set_route("Form", "Material Request", message);
 				},
@@ -1692,22 +1686,7 @@ function offer_procurement(frm, check, opts) {
 		})
 	);
 
-	// Only offered when this dialog is gating an actual Submit click — there
-	// is nothing to "proceed with" when it was opened from Check Stock or a
-	// vehicle change. Submitting anyway still goes through the trip's own
-	// server-side check, so a site that blocks short trips outright still
-	// blocks it there; this only skips the client-side detour for a site
-	// that merely warns.
-	if (opts.allow_submit_anyway) {
-		dialog.$wrapper.find(".modal-footer").prepend(
-			$(`<button class="btn btn-default btn-sm mr-2">${__("Submit Anyway")}</button>`).on("click", () => {
-				settle(true);
-				dialog.hide();
-			})
-		);
-	}
-
-	dialog.onhide = () => settle(false);
+	dialog.onhide = () => close();
 
 	dialog.show();
 }
