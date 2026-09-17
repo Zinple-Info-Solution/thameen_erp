@@ -1621,8 +1621,12 @@ function offer_procurement(frm, check, opts) {
 		)
 		.join("");
 
+	const warehouse = (check.shortfalls[0] || {}).source_warehouse || frm.doc.custom_loading_warehouse || "";
+
 	const html = `
-		<p>${__("The yard cannot fill this trip. Per item, in stock units:")}</p>
+		<p>${__("The required quantity is not available in the loading warehouse{0}.", [
+			warehouse ? ` (${frappe.utils.escape_html(warehouse)})` : "",
+		])}</p>
 		<table class="table table-bordered small">
 			<thead><tr>
 				<th>${__("Item")}</th>
@@ -1633,9 +1637,7 @@ function offer_procurement(frm, check, opts) {
 			</tr></thead>
 			<tbody>${rows}</tbody>
 		</table>
-		<p class="text-muted small">${__(
-			"Purchase Order: buy the shortfall into the loading warehouse; the trip loads from the yard once it is received."
-		)}</p>`;
+		<p class="text-muted small"><em>${__("Purchase the shortage and load the truck once received.")}</em></p>`;
 
 	const dialog = new frappe.ui.Dialog({
 		title: __("Insufficient Stock"),
