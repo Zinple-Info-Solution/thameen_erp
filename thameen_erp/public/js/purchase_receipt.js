@@ -22,13 +22,13 @@ frappe.ui.form.on("Purchase Receipt", {
 	// `link_shortfall_receipt_to_trip` (overrides.procurement) links the trip
 	// server-side, inside this same submit, via a raw db write — not part of
 	// the doc this form already has in memory, so a reload is what actually
-	// picks it up before deciding whether to jump there.
+	// picks it up. No navigation away any more — staying on the receipt and
+	// reloading it is enough: `refresh` already shows the "View" button once
+	// `custom_delivery_trip` is set, or the "Assign a Vehicle" / "Delivery
+	// Trips" buttons otherwise, so there is always a button to follow from
+	// here instead of the page jumping on its own.
 	on_submit(frm) {
-		frm.reload_doc().then(() => {
-			if (frm.doc.custom_delivery_trip) {
-				frappe.set_route("Form", "Delivery Trip", frm.doc.custom_delivery_trip);
-			}
-		});
+		frm.reload_doc();
 	},
 });
 

@@ -310,8 +310,6 @@ function render_preview(wrapper, p, direction, vehicle) {
 			return `<tr class="${short ? "text-danger" : ""}">
 				<td>${frappe.utils.escape_html(r.item_code)}</td>
 				<td class="text-right">${format_number(r.stock_qty)}</td>
-				<td class="text-right">${format_number(r.source_qty)}</td>
-				<td class="text-right">${short ? `<b>${format_number(r.shortfall)}</b>` : "—"}</td>
 			</tr>`;
 		})
 		.join("");
@@ -340,8 +338,6 @@ function render_preview(wrapper, p, direction, vehicle) {
 			<thead><tr>
 				<th>${__("Item")}</th>
 				<th class="text-right">${direction === "load" ? __("Loading") : __("Unloading")}</th>
-				<th class="text-right">${__("In source")}</th>
-				<th class="text-right">${__("Short")}</th>
 			</tr></thead>
 			<tbody>${rows}</tbody>
 		</table>

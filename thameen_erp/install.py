@@ -1307,6 +1307,7 @@ def _apply_property_setters():
 				"custom_trip_duration_hours",
 				"custom_transportation_cost",
 				"custom_transportation_item",
+				"custom_supplier_warehouse",
 			)
 		],
 		# ------------------------------------------------------------------

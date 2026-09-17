@@ -428,9 +428,7 @@ function confirm_loading(frm, advance) {
 
 function show_loading_confirm(frm, check, advance) {
 	const intro = check.sufficient
-		? __("Everything this trip needs is covered — some already on {0}, the rest from the warehouse below.", [
-				frm.doc.vehicle || __("the vehicle"),
-		  ])
+		? __("All trip requirements are already loaded on {0}.", [frm.doc.vehicle || __("the vehicle")])
 		: __("{0} does not have enough stock to fully load this trip.", [frm.doc.vehicle || __("The vehicle")]);
 
 	const html = `<p>${intro}</p>` + render_stock_table(check, frm.doc.vehicle);

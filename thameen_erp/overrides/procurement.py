@@ -576,6 +576,14 @@ def link_shortfall_receipt_to_trip(doc, method=None):
 		"custom_destination_type": "Customer",
 		"custom_trip_route": "Supplier to Customer",
 	}
+	# `_validate_supply_source` refuses to submit a Direct-from-Supplier trip
+	# with no `custom_purchase_order` — "the PO IS its stock" — and this is
+	# the one place that flips a trip to that supply source without ever
+	# having called `make_purchase_order` (which is what normally sets it).
+	# Without this, the trip has a real PO and its receipt already in hand,
+	# and still gets told it needs one.
+	if not trip.custom_purchase_order:
+		trip_updates["custom_purchase_order"] = po_name
 	if not trip.custom_supplier:
 		trip_updates["custom_supplier"] = po_supplier
 	if not trip.custom_supplier_warehouse:

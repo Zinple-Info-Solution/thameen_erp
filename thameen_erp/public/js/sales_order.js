@@ -31,8 +31,10 @@ frappe.ui.form.on("Sales Order", {
 // near-identical helper): Frappe keeps doctype_js files loaded once fetched,
 // so visiting both a Sales Order and a Purchase Receipt in one session would
 // otherwise redeclare the same top-level const/function twice and break both.
+// Sales Invoice stays — billing runs independently of the delivery side, so
+// it belongs next to Delivery Trips, not hidden with the rest.
 const SO_OTHER_CREATE_BUTTONS = [
-	"Pick List", "Delivery Note", "Work Order", "Sales Invoice",
+	"Pick List", "Delivery Note", "Work Order",
 	"Material Request", "Request for Raw Materials", "Purchase Order",
 	"Maintenance Visit", "Maintenance Schedule", "Project",
 	"Payment Request", "Payment",
