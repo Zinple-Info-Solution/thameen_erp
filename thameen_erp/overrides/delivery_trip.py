@@ -113,8 +113,13 @@ class ThameenDeliveryTrip(DeliveryTrip):
 
 		Every trip row falls back to this warehouse, and a row with no
 		warehouse cannot be loaded, so leaving it blank fails late and
-		confusingly. Order of preference: what the rows already agree on, then
-		the company default.
+		confusingly. Order of preference: what the rows already agree on,
+		then the company's oldest ordinary (non-vehicle) warehouse — there is
+		no "default yard" field on Company to read instead; the previous
+		fallback here read `default_warehouse_for_sales_return`, which is
+		ERPNext's own unrelated "where customer returns land" field, not a
+		general default, and a site with that field set would silently load
+		trips from its returns warehouse.
 		"""
 		if self.get("custom_loading_warehouse"):
 			return
@@ -126,14 +131,12 @@ class ThameenDeliveryTrip(DeliveryTrip):
 			return
 
 		if self.get("company"):
-			default = frappe.get_cached_value("Company", self.company, "default_warehouse_for_sales_return")
-			if not default:
-				default = frappe.db.get_value(
-					"Warehouse",
-					{"company": self.company, "is_group": 0, "custom_is_vehicle_warehouse": 0},
-					"name",
-					order_by="creation",
-				)
+			default = frappe.db.get_value(
+				"Warehouse",
+				{"company": self.company, "is_group": 0, "custom_is_vehicle_warehouse": 0},
+				"name",
+				order_by="creation",
+			)
 			if default:
 				self.custom_loading_warehouse = default
 

@@ -119,7 +119,16 @@ def split_by_capacity(rows, capacity, first_capacity=None, one_item_per_load=Fal
 
 
 def describe_loads(loads):
-	"""Plain summary for the confirmation dialog."""
+	"""Plain summary for the confirmation dialog.
+
+	Every qty here — the load's `total_qty` and each item's `qty` alike — is
+	in STOCK units, same as `stock_qty()` and same as vehicle Capacity. The
+	dialog's own math (truck free space, running totals) and the plan it
+	eventually sends back to `allocate_to_plan` are both stock-uom too, so
+	mixing in a row's transaction-uom `qty` here — as different as a tonne
+	from a bag — would silently misstate every total whenever an item's
+	transaction UOM isn't 1:1 with its stock UOM.
+	"""
 	return [
 		{
 			"load": index + 1,
@@ -128,8 +137,8 @@ def describe_loads(loads):
 				{
 					"item_code": row.get("item_code"),
 					"item_name": row.get("item_name"),
-					"qty": flt(row.get("qty")),
-					"uom": row.get("uom"),
+					"qty": stock_qty(row),
+					"uom": row.get("stock_uom") or row.get("uom"),
 				}
 				for row in load
 			],

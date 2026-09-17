@@ -541,7 +541,16 @@ function check_vehicle_load(frm, opts) {
 				return;
 			}
 
-			offer_split(frm, message, opts.check);
+			// The split dialog's "yard cannot cover it yet" note needs the
+			// stock check too, not just the capacity load — fetch it here so
+			// the button doesn't have to know that in advance.
+			frappe.call({
+				method: "thameen_erp.overrides.procurement.check_trip_stock",
+				args: { trip: frm.doc.name, vehicle: frm.doc.vehicle },
+				callback({ message: check }) {
+					offer_split(frm, message, check);
+				},
+			});
 		},
 	});
 }
@@ -1606,33 +1615,29 @@ function offer_procurement(frm, check, opts) {
 		if (opts.on_close) opts.on_close();
 	};
 
-	// "Short" is what even the yard cannot cover — the number that actually
-	// needs buying. What's on the truck and what's in the warehouse are shown
-	// alongside it for context only.
+	// The vehicle decides this, full stop — what the main warehouse holds is
+	// not shown here and does not reduce "Short". If it is not physically on
+	// the truck, it counts as missing, even when the yard has plenty.
 	const rows = check.shortfalls
 		.map(
 			(r) => `<tr>
 				<td>${frappe.utils.escape_html(r.item_code)}</td>
 				<td class="text-right">${format_number(r.planned_qty)}</td>
 				<td class="text-right">${format_number(r.on_truck_free)}</td>
-				<td class="text-right">${format_number(r.from_source)}</td>
-				<td class="text-right"><b>${format_number(r.purchase_shortfall)}</b></td>
+				<td class="text-right"><b>${format_number(r.shortfall)}</b></td>
 			</tr>`
 		)
 		.join("");
 
-	const warehouse = (check.shortfalls[0] || {}).source_warehouse || frm.doc.custom_loading_warehouse || "";
-
 	const html = `
-		<p>${__("The required quantity is not available in the loading warehouse{0}.", [
-			warehouse ? ` (${frappe.utils.escape_html(warehouse)})` : "",
+		<p>${__("The required quantity is not available on {0}.", [
+			frappe.utils.escape_html(frm.doc.vehicle || __("the vehicle")),
 		])}</p>
 		<table class="table table-bordered small">
 			<thead><tr>
 				<th>${__("Item")}</th>
 				<th class="text-right">${__("Planned")}</th>
 				<th class="text-right">${__("On truck")}</th>
-				<th class="text-right">${__("In warehouse")}</th>
 				<th class="text-right">${__("Short")}</th>
 			</tr></thead>
 			<tbody>${rows}</tbody>
@@ -1802,7 +1807,7 @@ function open_redirect_dialog(frm, destination) {
 					},
 					{ fieldname: "delivery_location", fieldtype: "Data", label: __("Delivery Site") },
 					{ fieldname: "transportation_charge", fieldtype: "Currency", label: __("Freight for this trip"),
-						default: frm.doc.custom_transportation_charge },
+						default: frm.doc.custom_transportation_cost },
 			  ]
 			: [
 					{

@@ -128,16 +128,12 @@ def _net_off_shared_source(result):
 	"""Two rows of OPC-43 from Main Store each see the full Main Store balance
 	above. Walk them in order and let each consume what the earlier ones took.
 
-	`shortfall` (what is not yet on the truck) decides "sufficient" now —
-	`_validate_stock_available` only counts what is already loaded, so this
-	matches it: cement the yard could easily cover still leaves the trip
-	short until it is actually on the truck.
-
-	`purchase_shortfall` is the narrower number `make_purchase_order`'s
-	shortfall mode actually buys against: whatever of the truck-shortfall
-	the yard ALSO cannot cover. Without this split, "buy the shortfall" would
-	buy cement a second time whenever the yard already has it and the truck
-	simply has not been loaded yet.
+	The vehicle decides everything now, on purpose: `shortfall` is what is
+	not yet physically on the truck, and that single number drives the
+	submit block, the Insufficient Stock dialog, and what gets bought.
+	The yard having plenty does not reduce it; it is reported
+	(`from_source`/`source_qty`) purely as information for the Loading
+	step, never as an offset.
 	"""
 	taken = {}
 	result["shortfalls"] = []
@@ -146,15 +142,12 @@ def _net_off_shared_source(result):
 		key = (line["item_code"], line["source_warehouse"])
 		left = max(flt(line["source_qty"]) - flt(taken.get(key)), 0.0)
 		need_from_source = flt(line["planned_qty"]) - flt(line["on_truck_free"])
-		from_source = min(need_from_source, left)
+		from_source = min(max(need_from_source, 0.0), left)
 		taken[key] = flt(taken.get(key)) + from_source
 		line["from_source"] = from_source
 
 		short = max(need_from_source, 0.0)
 		line["shortfall"] = short if short > QTY_TOLERANCE else 0.0
-
-		to_buy = max(need_from_source - from_source, 0.0)
-		line["purchase_shortfall"] = to_buy if to_buy > QTY_TOLERANCE else 0.0
 
 		if line["shortfall"]:
 			result["shortfalls"].append(line)
@@ -237,21 +230,21 @@ def make_purchase_order(trip, supplier=None, rows=None, mode="shortfall", schedu
 		# back to this trip, same as a direct-supply PO already does. Only
 		# falls back to the loading warehouse when no vehicle is assigned yet.
 		warehouse = _vehicle_warehouse_or_loading(doc)
-		# `purchase_shortfall`, not `shortfall`: the latter is "not yet on
-		# the truck," which the yard may already cover in full — buying that
-		# again would double it. Only what the yard ALSO cannot cover is
-		# genuinely missing and worth a Purchase Order.
+		# `shortfall` is what is not yet on the truck, full stop. The yard's
+		# own stock is not netted off: if the vehicle does not have it, it is
+		# bought, even when the yard already holds it and only loading is
+		# needed.
 		lines = [
 			{
 				"row_name": None,
 				"item_code": r["item_code"],
-				"qty": flt(r["purchase_shortfall"]) / (flt(r["conversion_factor"]) or 1),
+				"qty": flt(r["shortfall"]) / (flt(r["conversion_factor"]) or 1),
 				"uom": r["uom"],
 				"conversion_factor": flt(r["conversion_factor"]) or 1,
 				"warehouse": warehouse,
 			}
 			for r in check["shortfalls"]
-			if flt(r.get("purchase_shortfall")) > QTY_TOLERANCE and (not wanted or r["idx"] in wanted)
+			if flt(r.get("shortfall")) > QTY_TOLERANCE and (not wanted or r["idx"] in wanted)
 		]
 
 	if not lines:
@@ -323,13 +316,13 @@ def make_material_request(trip, rows=None):
 	if isinstance(rows, str):
 		rows = json.loads(rows or "[]")
 	wanted = {r.get("idx") for r in (rows or [])} if rows else None
-	# `purchase_shortfall`, not `shortfall` — a Material Request is a buy
-	# request too, and must not ask for cement the yard already has just
-	# because it has not been loaded onto the truck yet.
+	# `shortfall` is what is not yet on the truck. A row is requested here
+	# even if the yard already holds it; only Loading, not this request,
+	# checks the yard.
 	lines = [
 		r
 		for r in check["shortfalls"]
-		if flt(r.get("purchase_shortfall")) > QTY_TOLERANCE and (not wanted or r["idx"] in wanted)
+		if flt(r.get("shortfall")) > QTY_TOLERANCE and (not wanted or r["idx"] in wanted)
 	]
 	if not lines:
 		frappe.throw(_("Nothing short — every row is covered by stock on hand."))
@@ -349,7 +342,7 @@ def make_material_request(trip, rows=None):
 			"items",
 			{
 				"item_code": r["item_code"],
-				"qty": flt(r["purchase_shortfall"]) / (flt(r["conversion_factor"]) or 1),
+				"qty": flt(r["shortfall"]) / (flt(r["conversion_factor"]) or 1),
 				"uom": r["uom"],
 				"conversion_factor": flt(r["conversion_factor"]) or 1,
 				"warehouse": r["source_warehouse"],

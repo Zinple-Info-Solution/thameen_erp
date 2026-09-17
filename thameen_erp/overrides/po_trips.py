@@ -218,7 +218,7 @@ def create_trips_from_receipt(purchase_receipt, sales_order=None, plan=None, del
 		trip.custom_delivery_location = delivery_location
 		trip.custom_loading_warehouse = line["warehouse"]
 		if transportation_charge is not None and flt(transportation_charge) > 0:
-			trip.custom_transportation_charge = flt(transportation_charge)
+			trip.custom_transportation_cost = flt(transportation_charge)
 
 		if p.get("vehicle"):
 			trip.vehicle = p["vehicle"]
@@ -451,7 +451,7 @@ def redirect_trip(trip, destination, sales_order=None, target_warehouse=None, de
 			"custom_delivery_location": location,
 		}
 		if transportation_charge is not None and flt(transportation_charge) > 0:
-			updates["custom_transportation_charge"] = flt(transportation_charge)
+			updates["custom_transportation_cost"] = flt(transportation_charge)
 		doc.db_set(updates, update_modified=False)
 
 		customer = frappe.db.get_value("Sales Order", sales_order, "customer")
