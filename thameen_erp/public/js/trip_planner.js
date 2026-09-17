@@ -356,7 +356,9 @@ thameen.trip_planner._draw = function (dialog) {
 					${over ? `<div class="text-danger small">${__("over by {0}", [format_number(flt(p.qty) - planable)])}</div>` : ""}</td>
 				<td><select class="form-control input-xs tp-vehicle" data-i="${i}">${vehicle_opts(p.vehicle, i, p.item_code)}</select></td>
 				<td>${truck_state(p)}</td>
-				<td><select class="form-control input-xs tp-driver" data-i="${i}">${driver_opts(p.driver, i)}</select></td>
+				<td><select class="form-control input-xs tp-driver" data-i="${i}" ${p.vehicle ? "" : "disabled"} title="${
+					p.vehicle ? "" : frappe.utils.escape_html(__("Choose a vehicle first"))
+				}">${driver_opts(p.driver, i)}</select></td>
 				<td><input type="date" class="form-control input-xs tp-date" data-i="${i}" value="${date}" style="width:120px"></td>
 				<td><input type="time" class="form-control input-xs tp-time" data-i="${i}" value="${time}" style="width:90px"></td>
 				<td><a class="text-danger small tp-remove" data-i="${i}">${__("remove")}</a></td>
@@ -407,9 +409,15 @@ thameen.trip_planner._draw = function (dialog) {
 	wrapper.find(".tp-vehicle").on("change", function () {
 		const i = parseInt($(this).data("i"), 10);
 		plan[i].vehicle = $(this).val() || null;
-		// Default the row to this truck's usual driver, unless the dispatcher
-		// already picked one by hand — a manual pick survives a truck change.
-		if (!plan[i].driver_manual) {
+		// A driver may not be picked without a vehicle on the same row — if
+		// the vehicle is cleared, any driver already chosen goes with it.
+		if (!plan[i].vehicle) {
+			plan[i].driver = null;
+			plan[i].driver_manual = false;
+		} else if (!plan[i].driver_manual) {
+			// Default the row to this truck's usual driver, unless the
+			// dispatcher already picked one by hand — a manual pick survives
+			// a truck change.
 			const v = (o.vehicles || []).find((x) => x.name === plan[i].vehicle);
 			plan[i].driver = (v && v.driver) || null;
 		}

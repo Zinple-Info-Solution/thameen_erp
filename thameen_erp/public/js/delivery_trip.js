@@ -1508,9 +1508,6 @@ function render_stock_table(check, vehicle_name) {
 				<td class="text-right">${format_number(r.planned_qty)}</td>
 				<td>${r.on_truck_free ? frappe.utils.escape_html(vehicle_name || "") : ""}</td>
 				<td class="text-right">${r.on_truck_free ? format_number(r.on_truck_free) : "—"}</td>
-				<td>${frappe.utils.escape_html(r.source_warehouse || "")}</td>
-				<td class="text-right">${r.from_source ? format_number(r.from_source) : "—"}</td>
-				<td class="text-right">${r.shortfall ? `<b>${format_number(r.shortfall)}</b>` : "—"}</td>
 			</tr>`
 		)
 		.join("");
@@ -1521,9 +1518,6 @@ function render_stock_table(check, vehicle_name) {
 			<th class="text-right">${__("Planned")}</th>
 			<th>${__("Vehicle")}</th>
 			<th class="text-right">${__("On truck")}</th>
-			<th>${__("Warehouse")}</th>
-			<th class="text-right">${__("In warehouse")}</th>
-			<th class="text-right">${__("Short")}</th>
 		</tr></thead>
 		<tbody>${rows}</tbody>
 	</table>`;
@@ -1614,32 +1608,13 @@ function offer_procurement(frm, check, opts) {
 	};
 
 	// The vehicle decides this, full stop — what the main warehouse holds is
-	// not shown here and does not reduce "Short". If it is not physically on
-	// the truck, it counts as missing, even when the yard has plenty.
-	const rows = check.shortfalls
-		.map(
-			(r) => `<tr>
-				<td>${frappe.utils.escape_html(r.item_code)}</td>
-				<td class="text-right">${format_number(r.planned_qty)}</td>
-				<td class="text-right">${format_number(r.on_truck_free)}</td>
-				<td class="text-right"><b>${format_number(r.shortfall)}</b></td>
-			</tr>`
-		)
-		.join("");
-
+	// not counted here, even when the yard has plenty. The item breakdown
+	// itself is not shown any more, just the outcome — every action below
+	// still works off `check.shortfalls` regardless.
 	const html = `
 		<p>${__("The required quantity is not available on {0}.", [
 			frappe.utils.escape_html(frm.doc.vehicle || __("the vehicle")),
 		])}</p>
-		<table class="table table-bordered small">
-			<thead><tr>
-				<th>${__("Item")}</th>
-				<th class="text-right">${__("Planned")}</th>
-				<th class="text-right">${__("On truck")}</th>
-				<th class="text-right">${__("Short")}</th>
-			</tr></thead>
-			<tbody>${rows}</tbody>
-		</table>
 		<p class="text-muted small"><em>${__("Purchase the shortage and load the truck once received.")}</em></p>`;
 
 	const dialog = new frappe.ui.Dialog({
