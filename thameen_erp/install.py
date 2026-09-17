@@ -1254,12 +1254,14 @@ def _apply_property_setters():
 		# migrate rather than left to whatever the site last saved.
 		("Delivery Trip Item", "qty", "default", "0", "Data"),
 		("Customer Requirement Item", "qty", "default", "0", "Data"),
-		# The list now carries the actual clock times instead of the planned
-		# departure — dispatch asks "when did it go out and come back", not
-		# "when was it meant to".
-		("Delivery Trip", "departure_time", "in_list_view", "0", "Check"),
+		# The list also carries the actual clock times, not just the planned
+		# departure — dispatch asks "when did it go out and come back" as well
+		# as "when was it meant to". Delivered Qty sits next to them so the
+		# list answers "how much, and when" without opening the trip.
+		("Delivery Trip", "departure_time", "in_list_view", "1", "Check"),
 		("Delivery Trip", "custom_trip_start", "in_list_view", "1", "Check"),
 		("Delivery Trip", "custom_trip_end", "in_list_view", "1", "Check"),
+		("Delivery Trip", "custom_delivered_qty", "in_list_view", "1", "Check"),
 		(
 			"Delivery Trip",
 			None,

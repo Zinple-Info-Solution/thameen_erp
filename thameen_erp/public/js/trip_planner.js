@@ -7,6 +7,8 @@
 //       vehicles:  [{name, capacity, free, on_truck, driver}],
 //       drivers:   [{name, full_name}],          optional — omit to hide the column's choices
 //       allow_under: true                        may plan less than max
+//       hide_empty: false                        only offer trucks already carrying this item
+//       hide_full:  false                        drop trucks with no room left for this item
 //   })
 //   thameen.trip_planner.collect(dialog) -> plan rows with qty > 0, each carrying vehicle/driver/departure_time
 //
@@ -269,6 +271,22 @@ thameen.trip_planner._draw = function (dialog) {
 							v.is_empty ||
 							(v.on_truck_items || []).some((it) => it.item_code === item_code)
 					)
+					// `hide_empty`: only offer trucks that already carry some of
+					// this item — an empty truck, which would need a full yard
+					// load first, is not a candidate at all here.
+					.filter((v) => !o.hide_empty || v.name === value || !v.is_empty)
+					// `hide_full`: a truck with no room left for this item is not
+					// worth showing — empty trucks are exempt, they have the
+					// whole capacity still to offer. An unrated truck (no
+					// Capacity set) has no known ceiling to be "full" against —
+					// `_planable` returns null for it, same as `_free`/`_capacity`
+					// elsewhere in this file, and null must read as "not full",
+					// not as zero room.
+					.filter((v) => {
+						if (!o.hide_full || v.name === value || v.is_empty) return true;
+						const planable = thameen.trip_planner._planable(dialog, v.name);
+						return planable === null || planable > TP_TOL;
+					})
 					.map(
 						(v) =>
 							`<option value="${frappe.utils.escape_html(v.name)}" ${v.name === value ? "selected" : ""}>` +

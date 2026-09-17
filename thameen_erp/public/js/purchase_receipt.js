@@ -16,6 +16,7 @@ frappe.ui.form.on("Purchase Receipt", {
 
 		hide_other_receipt_create_buttons(frm);
 		add_delivery_trips_button_unless_vehicle_warehouse(frm);
+		add_waiting_trip_button(frm);
 	},
 
 	// `link_shortfall_receipt_to_trip` (overrides.procurement) links the trip
@@ -30,6 +31,34 @@ frappe.ui.form.on("Purchase Receipt", {
 		});
 	},
 });
+
+// Whether this receipt's stock was bought to fill a specific trip's
+// shortfall (either directly, or via "Material Request instead" that a
+// buyer later turned into a Purchase Order by hand — Frappe's own default
+// doc-mapping carries `custom_delivery_trip` through both hops with no
+// extra code), and that trip is still just sitting there Draft with no
+// vehicle assigned: point straight at it instead of leaving the dispatcher
+// to go find it. Once a vehicle is on the trip, or it is past Draft, this
+// stops showing — nothing left to "go finish".
+function add_waiting_trip_button(frm) {
+	// Skip the round trip entirely for a plain restock — nothing on this
+	// receipt even references a Purchase Order, so there is no trip to trace
+	// back to. `row.purchase_order` is already sitting in the doc, no fetch
+	// needed to check it.
+	if (!(frm.doc.items || []).some((r) => r.purchase_order)) return;
+
+	frappe.call({
+		method: "thameen_erp.overrides.po_trips.waiting_trip_for_receipt",
+		args: { purchase_receipt: frm.doc.name },
+		callback({ message: trip }) {
+			if (!trip) return;
+			frm.add_custom_button(
+				__("Assign a Vehicle — {0}", [trip]),
+				() => frappe.set_route("Form", "Delivery Trip", trip)
+			).addClass("btn-primary");
+		},
+	});
+}
 
 // A receipt accepted straight into a vehicle warehouse is filling a specific
 // trip's shortfall — see `link_shortfall_receipt_to_trip` in
@@ -211,5 +240,10 @@ function build_receipt_dialog(frm, data, pending) {
 	dialog.show();
 	thameen.trip_planner.render(dialog, {
 		plan, limits, vehicles: data.vehicles || [], drivers: data.drivers || [], allow_under: true,
+		// hide_full: a truck already full of this item (or of something else,
+		// filtered separately above) is not a candidate for freshly-received
+		// stock — only an empty truck or one with real room left is worth
+		// offering.
+		hide_full: true,
 	});
 }

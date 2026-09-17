@@ -124,7 +124,13 @@ function open_so_planner(frm, data) {
 		// No dialog-level vehicle, date or days-between field any more —
 		// "Same truck for all" falls back to whichever vehicle and date are
 		// already on the first row of the table, stepping one day at a time.
+		//
+		// hide_empty: only trucks already carrying this item are offered here.
+		// An empty truck needs a full yard load first — that qty is left
+		// unassigned instead, so it ends up on its own "choose later" row,
+		// which is exactly what raises a Material Request for it later.
 		plan, limits, vehicles: data.vehicles || [], drivers: data.drivers || [], allow_under: true,
+		hide_empty: true,
 	});
 }
 

@@ -87,23 +87,85 @@ def pending_receipt_lines(pr):
 	return lines
 
 
-def _traced_sales_order(pr):
-	"""If this receipt exists because a Sales Order came up short — bought
-	through 'Create Purchase Order for Shortfall' on the trip that was short —
-	trace back to that order: Purchase Receipt row -> its Purchase Order ->
-	`custom_delivery_trip` (set by `make_purchase_order` in
-	overrides.procurement) -> that trip's `custom_sales_order`.
+def _traced_trip(pr_name):
+	"""If this receipt exists because a trip came up short — bought through
+	'Create Purchase Order for Shortfall' (direct) or 'Material Request
+	instead' (which a buyer later turned into a Purchase Order by hand) —
+	trace back to that trip: Purchase Receipt row -> its Purchase Order ->
+	`custom_delivery_trip`.
 
-	None when the receipt covers more than one Purchase Order, or that order
-	was not raised from a trip shortfall — an ordinary restock purchase,
-	which is not yet sold to anyone in particular.
+	The Material Request path relies on nothing more than Frappe's own
+	default doc-mapping: `custom_delivery_trip` exists on Material Request,
+	Purchase Order and Purchase Receipt alike, under the same fieldname and
+	none of them `no_copy`, so ERPNext's standard "Create Purchase Order"
+	(from the Material Request) and "Create Purchase Receipt" (from that
+	Purchase Order) carry it forward with no extra code on our side.
+
+	None when the receipt's Purchase Order(s) do not all trace to the SAME
+	trip, or none of them trace to a trip at all — an ordinary restock
+	purchase, not yet sold to anyone in particular. Two Purchase Orders both
+	pointing at the same trip (a shortfall split across two POs, or a second
+	one raised later for the same short trip) is not ambiguous and still
+	resolves — only a genuine split across different trips, or a mix of
+	trip and non-trip POs, is.
+
+	Takes the receipt's name, not a loaded doc — every caller only ever
+	needs the item rows' own `purchase_order` column, so a full `get_doc`
+	(every child table, the whole controller/hook path) would just be
+	wasted work here.
 	"""
-	po_names = {row.purchase_order for row in pr.items if row.get("purchase_order")}
-	if len(po_names) != 1:
+	po_names = list(
+		frappe.get_all(
+			"Purchase Receipt Item",
+			filters={"parent": pr_name, "purchase_order": ("is", "set")},
+			pluck="purchase_order",
+		)
+	)
+	if not po_names:
 		return None
 
-	trip = frappe.db.get_value("Purchase Order", po_names.pop(), "custom_delivery_trip")
+	trips = set(
+		frappe.get_all("Purchase Order", filters={"name": ("in", po_names)}, pluck="custom_delivery_trip")
+	)
+	trips.discard(None)
+	trips.discard("")
+	if len(trips) != 1:
+		return None
+	return trips.pop()
+
+
+def _traced_sales_order(pr_name):
+	"""Same trace as `_traced_trip`, one hop further to that trip's own
+	`custom_sales_order`."""
+	trip = _traced_trip(pr_name)
 	return frappe.db.get_value("Delivery Trip", trip, "custom_sales_order") if trip else None
+
+
+@frappe.whitelist()
+def waiting_trip_for_receipt(purchase_receipt):
+	"""The Delivery Trip this receipt's stock was bought for, if it is still
+	sitting there waiting — Draft, no vehicle yet. Once a vehicle is set (or
+	the trip has moved past Draft), it is no longer "waiting" and this
+	returns None; a `Purchase Receipt` button offering to jump to it would
+	otherwise dangle after the very next save.
+	"""
+	frappe.has_permission("Purchase Receipt", "read", doc=purchase_receipt, throw=True)
+
+	trip = _traced_trip(purchase_receipt)
+	if not trip:
+		return None
+
+	# `custom_delivery_trip` on the Purchase Order is a plain Link, not
+	# enforced by anything — the trip it names could have been deleted or
+	# renamed since. get_value on a name that no longer exists returns None,
+	# not a tuple of Nones, so this must not unpack it blindly.
+	row = frappe.db.get_value("Delivery Trip", trip, ["docstatus", "vehicle"])
+	if not row:
+		return None
+	docstatus, vehicle = row
+	if docstatus == 0 and not vehicle and frappe.has_permission("Delivery Trip", "read", doc=trip):
+		return trip
+	return None
 
 
 @frappe.whitelist()
@@ -122,7 +184,7 @@ def preview_receipt_trips(purchase_receipt):
 		"supplier": pr.supplier,
 		"company": pr.company,
 		"lines": lines,
-		"sales_order": _traced_sales_order(pr),
+		"sales_order": _traced_sales_order(pr.name),
 		"vehicles": list_vehicles_for_planning(
 			items=[row.get("item_code") for row in lines if row.get("item_code")]
 		),
