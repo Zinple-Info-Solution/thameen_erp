@@ -1256,11 +1256,13 @@ def _apply_property_setters():
 		("Customer Requirement Item", "qty", "default", "0", "Data"),
 		# The list also carries the actual clock times, not just the planned
 		# departure — dispatch asks "when did it go out and come back" as well
-		# as "when was it meant to". Delivered Qty sits next to them so the
-		# list answers "how much, and when" without opening the trip.
+		# as "when was it meant to". Planned and Delivered Qty sit next to
+		# them so the list answers "how much, and when" without opening the
+		# trip.
 		("Delivery Trip", "departure_time", "in_list_view", "1", "Check"),
 		("Delivery Trip", "custom_trip_start", "in_list_view", "1", "Check"),
 		("Delivery Trip", "custom_trip_end", "in_list_view", "1", "Check"),
+		("Delivery Trip", "custom_planned_qty", "in_list_view", "1", "Check"),
 		("Delivery Trip", "custom_delivered_qty", "in_list_view", "1", "Check"),
 		(
 			"Delivery Trip",
