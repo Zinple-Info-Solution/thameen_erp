@@ -118,6 +118,7 @@ class ThameenDeliveryTrip(DeliveryTrip):
 		self._validate_vehicle_capacity()
 		self._validate_vehicle_item_conflict()
 		self._validate_pickup_vehicle_empty()
+		self._validate_po_pending_qty()
 		self._validate_stock_available()
 		self._validate_transport_type()
 		self._fill_supplier_from_po_or_receipt()
@@ -386,10 +387,11 @@ class ThameenDeliveryTrip(DeliveryTrip):
 				frappe.throw(_("Row {0}: Planned Qty must be greater than zero.").format(row.idx))
 
 		# A Sales Order per row is the rule ONLY for trips that end at a
-		# customer — that is where the Delivery Note comes from. An inbound
-		# trip (Supplier → My Warehouse) has no customer and no Sales Order;
-		# if your site made Delivery Trip Item.sales_order mandatory via
-		# Customize Form, run bench migrate — the app resets it to optional.
+		# customer — that is where the Delivery Note comes from. Any other
+		# destination (Own Warehouse, or a pickup trip's Supplier) has no
+		# customer and no Sales Order; if your site made Delivery Trip
+		# Item.sales_order mandatory via Customize Form, run bench migrate —
+		# the app resets it to optional.
 		if self._action == "submit" and (self.get("custom_destination_type") or "Customer") == "Customer":
 			missing = [str(row.idx) for row in rows if not row.sales_order]
 			if missing:
@@ -397,30 +399,6 @@ class ThameenDeliveryTrip(DeliveryTrip):
 					_("Row(s) {0}: a customer trip needs a Sales Order on every row — that is what the "
 					  "Delivery Note is raised against. For a supplier → warehouse trip, set Destination "
 					  "to Own Warehouse instead.").format(", ".join(missing))
-				)
-
-		# Customer trips are billed through Delivery Notes, and a Delivery Note
-		# needs the Sales Order line. Inbound trips have no customer and no SO.
-		if self._action == "submit" and self.get("custom_destination_type") != "Own Warehouse":
-			orphans = [str(row.idx) for row in rows if not row.sales_order]
-			if orphans:
-				frappe.throw(
-					_("Row(s) {0} have no Sales Order. A trip to a customer needs one on every row "
-					  "so the Delivery Note can be raised — or set Destination = Own Warehouse for an inbound trip.").format(
-						", ".join(orphans)
-					)
-				)
-
-		# A customer trip delivers against a Sales Order — the Delivery Note at
-		# `Delivered` needs it. An inbound (Own Warehouse) trip has none.
-		if self.get("custom_destination_type") != "Own Warehouse" and self._action == "submit":
-			missing = [str(row.idx) for row in rows if not row.sales_order]
-			if missing:
-				frappe.throw(
-					_("Row(s) {0} have no Sales Order. A customer trip needs one on every row — "
-					  "or set Destination = Own Warehouse if this load is coming into the yard.").format(
-						", ".join(missing)
-					)
 				)
 
 	def _set_distance(self):
@@ -649,7 +627,11 @@ class ThameenDeliveryTrip(DeliveryTrip):
 
 		Direct-from-supplier trips are exempt: their stock is the Purchase
 		Order, not the yard, and _validate_supply_source already requires a
-		submitted PO before they can go.
+		submitted PO before they can go. A pickup trip is exempt for the
+		same reason, one step earlier: it submits BEFORE it collects
+		anything — its own item rows (if it has any at all — see
+		`create_pickup_trips`) describe what it is going to bring back, not
+		what should already be on the truck.
 
 		Turn 'Block Trips Without Enough Stock' off in Thameen Fleet Settings
 		to get a warning instead of a refusal.
@@ -657,6 +639,8 @@ class ThameenDeliveryTrip(DeliveryTrip):
 		if self._action != "submit":
 			return
 		if self.get("custom_supply_source") == "Direct from Supplier":
+			return
+		if self.get("custom_trip_route") == PICKUP_ROUTE:
 			return
 
 		rows = [row for row in (self.get("custom_trip_items") or []) if flt(row.qty) > 0]
@@ -871,15 +855,19 @@ class ThameenDeliveryTrip(DeliveryTrip):
 						),
 						title=_("Purchase Order Closed"),
 					)
-				self._validate_po_pending_qty()
 
 	def _validate_po_pending_qty(self):
-		"""A direct trip may not collect more than the PO still has outstanding.
+		"""A trip may not collect more than its Purchase Order still has
+		outstanding — a direct-supply trip's own rows, or a pickup trip's
+		(see `create_pickup_trips`), alike.
 
 		Only rows carrying a `po_detail` are checked — a row without one has no
 		line to measure against, and blocking it would break trips built before
-		the link existed.
+		the link existed. Only at submit, same reasoning as everywhere else
+		that gates on the PO: a draft may be planned before the PO catches up.
 		"""
+		if self._action != "submit":
+			return
 		rows = [row for row in (self.get("custom_trip_items") or []) if row.get("po_detail")]
 		if not rows:
 			return

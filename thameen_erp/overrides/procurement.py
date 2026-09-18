@@ -596,7 +596,35 @@ def link_shortfall_receipt_to_trip(doc, method=None):
 		return
 
 	po_name = po_names.pop()
-	po_supplier, trip_name = frappe.db.get_value("Purchase Order", po_name, ["supplier", "custom_delivery_trip"])
+	po_supplier = frappe.db.get_value("Purchase Order", po_name, "supplier")
+
+	# The vehicle a row lands on picks the trip directly, not
+	# `Purchase Order.custom_delivery_trip` — that field is one Link, no
+	# good once a PO is split across several pickup trips (one per truck),
+	# where each truck's own receipt must find ITS OWN trip, not whichever
+	# one the PO happens to point at. A vehicle can only ever be on one
+	# open trip at a time (see `vehicles_booked_on_other_trips`), so this
+	# resolves correctly no matter how many sibling trips share the PO.
+	vehicle_warehouse = vehicle_rows[0].warehouse
+	if any(row.warehouse != vehicle_warehouse for row in vehicle_rows):
+		frappe.msgprint(
+			_("This receipt's vehicle-warehouse rows land on more than one truck, so no Delivery "
+			  "Trip could be linked automatically. Link it by hand on the trip if one applies."),
+			indicator="orange",
+			title=_("Not Linked"),
+		)
+		return
+
+	vehicle_name = frappe.db.get_value("Vehicle", {"custom_vehicle_warehouse": vehicle_warehouse}, "name")
+	if not vehicle_name:
+		return
+
+	trip_name = frappe.db.get_value(
+		"Delivery Trip",
+		{"vehicle": vehicle_name, "custom_purchase_order": po_name, "docstatus": 1},
+		"name",
+		order_by="creation desc",
+	)
 	if not trip_name:
 		return
 
@@ -638,8 +666,6 @@ def link_shortfall_receipt_to_trip(doc, method=None):
 			title=_("Already Linked"),
 		)
 		return
-
-	vehicle_warehouse = vehicle_rows[0].warehouse
 
 	# Set here, not left for the trip's own `_fill_supplier_from_po_or_receipt`
 	# to catch on its next save: that only runs inside validate(), and this
@@ -885,78 +911,192 @@ def _vehicle_warehouse_or_loading(doc):
 
 
 @frappe.whitelist()
-def create_pickup_trip(purchase_order, vehicle, driver=None, departure_time=None):
-	"""An empty truck, sent to collect what a just-submitted Purchase Order
-	bought. No trip items, no stock check — the PO itself is what backs
-	this trip, and nothing is actually loaded until its Purchase Receipt is
-	submitted, at which point this trip moves itself on to "Trip Reached
-	and Loaded" (see `link_shortfall_receipt_to_trip`).
+def create_pickup_trips(purchase_order, plan):
+	"""One pickup trip per vehicle — an empty truck each, sent to collect a
+	share of what a just-submitted Purchase Order bought. A PO too big for
+	one truck's capacity is exactly why `plan` is a list, not a single
+	vehicle: [{vehicle, qty, driver?, departure_time?}, ...], `qty` in
+	stock units, cut across the PO's own item rows in order (the same
+	cut-and-carry a cargo trip's Split Into Trips uses, just driven by what
+	the dispatcher typed here rather than each truck's rated capacity).
+
+	Each trip's item rows carry `po_detail` — the same per-ROW link
+	`make_purchase_order`'s "direct" mode already stamps on a cargo trip —
+	so `link_shortfall_receipt_to_trip` can find the RIGHT trip once
+	several share the one PO: by then it resolves through the vehicle a
+	receipt actually lands on, never through this PO's own
+	`custom_delivery_trip` (one Link, no good for more than one trip at
+	once — kept updated anyway, purely so the PO's own "View" button has
+	somewhere to point).
+
+	No stock check on submit — the PO itself is what backs these trips,
+	and nothing is actually loaded until each one's own Purchase Receipt is
+	submitted, which moves that one trip on to "Trip Reached and Loaded"
+	on its own (see `link_shortfall_receipt_to_trip`).
 	"""
 	frappe.has_permission("Delivery Trip", "create", throw=True)
+
+	if isinstance(plan, str):
+		plan = json.loads(plan or "[]")
+	plan = [p for p in (plan or []) if p.get("vehicle") and flt(p.get("qty")) > 0]
+	if not plan:
+		frappe.throw(_("Add at least one vehicle with a quantity."))
 
 	po = frappe.get_doc("Purchase Order", purchase_order)
 	if po.docstatus != 1:
 		frappe.throw(_("Submit the Purchase Order first."))
 
-	# A PO already linked to a trip — usually one that raised this same PO
-	# for its own supply, the older way — can still get its own, separate
-	# pickup trip; this just says so up front rather than silently moving
-	# the PO's link out from under the trip that made it. That older
-	# trip's own Loading step reaches its Purchase Receipt through its own
-	# `custom_purchase_order` field regardless of which trip this PO points
-	# at afterwards, so nothing there breaks.
-	previous_trip = po.get("custom_delivery_trip")
+	claimed = _pickup_claimed_by_po_detail(po.name)
+	pool = []
+	for row in po.items:
+		left = max(flt(row.stock_qty) - flt(claimed.get(row.name)), 0.0)
+		if left > QTY_TOLERANCE:
+			pool.append(
+				{
+					"po_detail": row.name,
+					"item_code": row.item_code,
+					"item_name": row.item_name,
+					"uom": row.uom,
+					"stock_uom": row.stock_uom,
+					"conversion_factor": flt(row.conversion_factor) or 1,
+					"left": left,
+				}
+			)
 
-	vehicle_warehouse = frappe.db.get_value("Vehicle", vehicle, "custom_vehicle_warehouse")
-	if not vehicle_warehouse:
-		frappe.throw(_("{0} has no vehicle warehouse set up — it cannot be sent anywhere.").format(vehicle))
-	if frappe.db.exists("Bin", {"warehouse": vehicle_warehouse, "actual_qty": (">", 0)}):
-		frappe.throw(_("{0} is not empty — a pickup trip needs an empty truck.").format(vehicle))
+	total_requested = sum(flt(p["qty"]) for p in plan)
+	total_pending = sum(entry["left"] for entry in pool)
+	if total_requested > total_pending + QTY_TOLERANCE:
+		frappe.throw(
+			_("The plan sends {0}, but only {1} of this PO is not already claimed by another "
+			  "pickup trip.").format(flt(total_requested, 2), flt(total_pending, 2))
+		)
 
 	from thameen_erp.overrides.delivery_trip import PICKUP_ROUTE
 
-	trip = frappe.new_doc("Delivery Trip")
-	trip.company = po.company
-	trip.custom_supply_source = OWN
-	trip.custom_destination_type = "Supplier"
-	trip.custom_trip_route = PICKUP_ROUTE
-	trip.custom_supplier = po.supplier
-	trip.custom_purchase_order = po.name
-	trip.vehicle = vehicle
-	if driver:
-		trip.driver = driver
-	trip.departure_time = departure_time or now_datetime()
-	trip.flags.ignore_mandatory = True
-	trip.insert()
+	created = []
+	for p in plan:
+		vehicle = p["vehicle"]
+		vehicle_warehouse = frappe.db.get_value("Vehicle", vehicle, "custom_vehicle_warehouse")
+		if not vehicle_warehouse:
+			frappe.throw(_("{0} has no vehicle warehouse set up — it cannot be sent anywhere.").format(vehicle))
+		if frappe.db.exists("Bin", {"warehouse": vehicle_warehouse, "actual_qty": (">", 0)}):
+			frappe.throw(_("{0} is not empty — a pickup trip needs an empty truck.").format(vehicle))
 
-	# The reverse link — without it, the Purchase Receipt made from this PO
-	# never gets `custom_delivery_trip` carried onto it by Frappe's own
-	# default field-mapping, and `link_shortfall_receipt_to_trip` (which
-	# traces receipt -> PO -> custom_delivery_trip) would have nothing to
-	# trace back to.
-	frappe.db.set_value("Purchase Order", po.name, "custom_delivery_trip", trip.name, update_modified=False)
+		need = flt(p["qty"])
+		rows_for_trip = []
+		for entry in pool:
+			if need <= QTY_TOLERANCE:
+				break
+			if entry["left"] <= QTY_TOLERANCE:
+				continue
+			take = min(entry["left"], need)
+			rows_for_trip.append({**entry, "qty_taken": take})
+			entry["left"] -= take
+			need -= take
 
-	if previous_trip and previous_trip != trip.name:
-		frappe.msgprint(
-			_("{0} was already linked to {1} — that trip is untouched, but {2} now carries the "
-			  "PO's own link instead. A Purchase Receipt made against this PO from here on "
-			  "advances {2}, not {1}.").format(
-				po.name,
-				get_link_to_form("Delivery Trip", previous_trip),
-				get_link_to_form("Delivery Trip", trip.name),
-			),
-			indicator="orange",
-			title=_("PO Link Moved"),
-		)
+		trip = frappe.new_doc("Delivery Trip")
+		trip.company = po.company
+		trip.custom_supply_source = OWN
+		trip.custom_destination_type = "Supplier"
+		trip.custom_trip_route = PICKUP_ROUTE
+		trip.custom_supplier = po.supplier
+		trip.custom_purchase_order = po.name
+		trip.vehicle = vehicle
+		if p.get("driver"):
+			trip.driver = p["driver"]
+		trip.departure_time = p.get("departure_time") or now_datetime()
+		trip.flags.ignore_mandatory = True
+
+		for r in rows_for_trip:
+			trip.append(
+				"custom_trip_items",
+				{
+					"item_code": r["item_code"],
+					"item_name": r["item_name"],
+					"qty": flt(r["qty_taken"]) / (flt(r["conversion_factor"]) or 1),
+					"uom": r["uom"],
+					"stock_uom": r["stock_uom"],
+					"conversion_factor": r["conversion_factor"],
+					"purchase_order": po.name,
+					"po_detail": r["po_detail"],
+				},
+			)
+
+		trip.insert()
+		created.append(trip.name)
+
+	# Informational only now — `link_shortfall_receipt_to_trip` resolves
+	# each receipt through the vehicle it lands on, not through this
+	# field, so it is safe to just point at whichever trip was created
+	# last; the PO's own "View" button needs somewhere to go.
+	frappe.db.set_value("Purchase Order", po.name, "custom_delivery_trip", created[-1], update_modified=False)
 
 	frappe.msgprint(
-		_("{0} created for {1} to collect {2}.").format(
-			get_link_to_form("Delivery Trip", trip.name), vehicle, get_link_to_form("Purchase Order", po.name)
+		_("{0} pickup trip(s) created: {1}.").format(
+			len(created), ", ".join(get_link_to_form("Delivery Trip", t) for t in created)
 		),
 		indicator="green",
 		alert=True,
 	)
-	return trip.name
+	return created
+
+
+def _pickup_claimed_by_po_detail(po_name):
+	"""{po_detail: qty} already claimed by an open (not cancelled) pickup
+	trip against this PO — so a second batch of vehicles, sent later for
+	the same PO, does not re-claim quantity a first batch already owns."""
+	rows = frappe.db.sql(
+		"""
+		select i.po_detail, sum(ifnull(i.qty, 0) * ifnull(nullif(i.conversion_factor, 0), 1)) as qty
+		from `tabDelivery Trip Item` i
+		inner join `tabDelivery Trip` t on t.name = i.parent
+		where i.purchase_order = %(po)s and t.docstatus < 2 and i.po_detail is not null
+		group by i.po_detail
+		""",
+		{"po": po_name},
+		as_dict=True,
+	)
+	return {r.po_detail: flt(r.qty) for r in rows}
+
+
+@frappe.whitelist()
+def pending_pickup_qty(purchase_order):
+	"""What of this PO no pickup trip has claimed yet, item by item, plus
+	the empty vehicles and drivers on offer right now — everything the
+	"Send Vehicle to Collect" dialog needs in one call, before
+	`create_pickup_trips` re-checks the plan for real."""
+	po = frappe.get_doc("Purchase Order", purchase_order)
+	claimed = _pickup_claimed_by_po_detail(po.name)
+
+	lines = []
+	for row in po.items:
+		left = max(flt(row.stock_qty) - flt(claimed.get(row.name)), 0.0)
+		lines.append(
+			{
+				"item_code": row.item_code,
+				"item_name": row.item_name,
+				"stock_uom": row.stock_uom,
+				"ordered": flt(row.stock_qty),
+				"pending": left,
+			}
+		)
+
+	from thameen_erp.overrides.sales_order import _drivers_for_planning
+	from thameen_erp.overrides.vehicle_load import list_vehicles_for_planning
+
+	vehicles = [
+		{"name": v.name, "capacity": flt(v.capacity)}
+		for v in list_vehicles_for_planning()
+		if v.is_empty
+	]
+	drivers = [{"name": d.name, "full_name": d.full_name} for d in _drivers_for_planning()]
+
+	return {
+		"lines": lines,
+		"total_pending": sum(l["pending"] for l in lines),
+		"vehicles": vehicles,
+		"drivers": drivers,
+	}
 
 
 @frappe.whitelist()
