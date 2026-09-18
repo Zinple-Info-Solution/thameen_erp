@@ -12,8 +12,11 @@ frappe.ui.form.on("Purchase Order", {
 		if (frm.doc.custom_delivery_trip) {
 			frm.add_custom_button(frm.doc.custom_delivery_trip,
 				() => frappe.set_route("Form", "Delivery Trip", frm.doc.custom_delivery_trip), __("View"));
-			return;
 		}
+		// Offered either way — a PO already linked to a trip (the older
+		// trip-raises-its-own-PO flow above) can still get its own,
+		// separate pickup trip. `create_pickup_trip` warns rather than
+		// silently overwriting that existing link.
 		if (frm.doc.docstatus === 1) {
 			frm.add_custom_button(__("Send Vehicle to Collect"), () => open_pickup_trip_dialog(frm))
 				.addClass("btn-primary");

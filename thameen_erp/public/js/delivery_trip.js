@@ -1794,20 +1794,14 @@ function add_purchase_invoice_button(frm) {
 	const order = frm.doc.custom_purchase_order;
 	if (!receipt && !order) return;
 
-	frappe.db
-		.get_list("Purchase Invoice Item", {
-			filters: receipt ? { purchase_receipt: receipt, docstatus: 1 } : { purchase_order: order, docstatus: 1 },
-			fields: ["parent"],
-			limit: 1,
-		})
-		.then((rows) => {
-			if (!rows || !rows.length) return;
-			frm.add_custom_button(
-				rows[0].parent,
-				() => frappe.set_route("Form", "Purchase Invoice", rows[0].parent),
-				__("View")
-			);
-		});
+	frappe.call({
+		method: "thameen_erp.overrides.procurement.linked_purchase_invoice",
+		args: { purchase_receipt: receipt, purchase_order: receipt ? null : order },
+		callback({ message: invoice }) {
+			if (!invoice) return;
+			frm.add_custom_button(invoice, () => frappe.set_route("Form", "Purchase Invoice", invoice), __("View"));
+		},
+	});
 }
 
 function add_procurement_buttons(frm) {

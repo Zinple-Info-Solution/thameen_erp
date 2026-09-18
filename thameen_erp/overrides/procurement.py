@@ -801,6 +801,37 @@ def split_trip_by_item(trip):
 	return created
 
 
+@frappe.whitelist()
+def linked_purchase_invoice(purchase_receipt=None, purchase_order=None):
+	"""The Purchase Invoice raised against a receipt or order, if any —
+	nothing on the trip points at one directly, so this is a lookup rather
+	than a stored field.
+
+	Done server-side with `ignore_permissions`, not a plain
+	`frappe.db.get_list` from the browser: "Purchase Invoice Item" is a
+	child table, and querying one directly over the client API needs the
+	parent doctype in context to check permissions at all — without it,
+	Frappe refuses with "X is not a valid parent DocType for X" before this
+	ever gets to look at the data. Read access is still checked, just
+	against Purchase Invoice itself, once, here.
+	"""
+	if not (purchase_receipt or purchase_order):
+		return None
+	if not frappe.has_permission("Purchase Invoice", "read"):
+		return None
+
+	filters = {"docstatus": 1}
+	if purchase_receipt:
+		filters["purchase_receipt"] = purchase_receipt
+	else:
+		filters["purchase_order"] = purchase_order
+
+	rows = frappe.get_all(
+		"Purchase Invoice Item", filters=filters, fields=["parent"], limit_page_length=1, ignore_permissions=True
+	)
+	return rows[0].parent if rows else None
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -866,12 +897,15 @@ def create_pickup_trip(purchase_order, vehicle, driver=None, departure_time=None
 	po = frappe.get_doc("Purchase Order", purchase_order)
 	if po.docstatus != 1:
 		frappe.throw(_("Submit the Purchase Order first."))
-	if po.get("custom_delivery_trip"):
-		frappe.throw(
-			_("{0} is already linked to {1}.").format(
-				po.name, get_link_to_form("Delivery Trip", po.custom_delivery_trip)
-			)
-		)
+
+	# A PO already linked to a trip — usually one that raised this same PO
+	# for its own supply, the older way — can still get its own, separate
+	# pickup trip; this just says so up front rather than silently moving
+	# the PO's link out from under the trip that made it. That older
+	# trip's own Loading step reaches its Purchase Receipt through its own
+	# `custom_purchase_order` field regardless of which trip this PO points
+	# at afterwards, so nothing there breaks.
+	previous_trip = po.get("custom_delivery_trip")
 
 	vehicle_warehouse = frappe.db.get_value("Vehicle", vehicle, "custom_vehicle_warehouse")
 	if not vehicle_warehouse:
@@ -901,6 +935,19 @@ def create_pickup_trip(purchase_order, vehicle, driver=None, departure_time=None
 	# traces receipt -> PO -> custom_delivery_trip) would have nothing to
 	# trace back to.
 	frappe.db.set_value("Purchase Order", po.name, "custom_delivery_trip", trip.name, update_modified=False)
+
+	if previous_trip and previous_trip != trip.name:
+		frappe.msgprint(
+			_("{0} was already linked to {1} — that trip is untouched, but {2} now carries the "
+			  "PO's own link instead. A Purchase Receipt made against this PO from here on "
+			  "advances {2}, not {1}.").format(
+				po.name,
+				get_link_to_form("Delivery Trip", previous_trip),
+				get_link_to_form("Delivery Trip", trip.name),
+			),
+			indicator="orange",
+			title=_("PO Link Moved"),
+		)
 
 	frappe.msgprint(
 		_("{0} created for {1} to collect {2}.").format(
