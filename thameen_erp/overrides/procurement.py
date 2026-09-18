@@ -42,7 +42,7 @@ import json
 
 import frappe
 from frappe import _
-from frappe.utils import cint, flt, get_link_to_form, getdate, nowdate
+from frappe.utils import cint, flt, get_link_to_form, getdate, now_datetime, nowdate
 
 from thameen_erp.overrides.vehicle_stock import QTY_TOLERANCE, free_truck_stock
 
@@ -472,6 +472,63 @@ def receive_onto_vehicle(trip_doc):
 	return pr.name
 
 
+def _link_ordinary_receipt_to_waiting_trip(doc):
+	"""An ordinary receipt into the yard — no vehicle-warehouse row at all,
+	so none of the Direct-from-Supplier machinery below applies. The goods
+	are correctly sitting in the yard; Loading still moves them onto the
+	truck the normal way.
+
+	The only thing missing without this: a trip whose shortfall was bought
+	through 'Material Request instead' (a buyer's own Purchase Order, not
+	`make_purchase_order`) never gets `custom_purchase_order` or
+	`custom_purchase_receipt` recorded on it at all, so it shows none of the
+	View buttons a shortfall bought directly does. This fills those in,
+	purely for traceability — never `custom_supply_source`, destination or
+	route, which stay exactly as a yard-sourced trip's already are.
+
+	A pickup trip is the one exception: it never moves forward from
+	anything but a vehicle-warehouse receipt (see
+	`link_shortfall_receipt_to_trip`, the sibling that handles that case),
+	so tracing back to one HERE means its Purchase Receipt was made against
+	the yard by mistake — refused outright, while it can still be fixed,
+	rather than left to quietly strand the trip at "Trip Started" forever.
+	"""
+	from thameen_erp.overrides.delivery_trip import PICKUP_ROUTE
+	from thameen_erp.overrides.po_trips import _traced_trip
+
+	trip_name = _traced_trip(doc.name)
+	if not trip_name:
+		return
+
+	row = frappe.db.get_value(
+		"Delivery Trip", trip_name,
+		["custom_purchase_order", "custom_purchase_receipt", "custom_trip_route", "vehicle"],
+	)
+	if not row:
+		return
+	trip_po, trip_pr, trip_route, trip_vehicle = row
+
+	if trip_route == PICKUP_ROUTE:
+		frappe.throw(
+			_("{0} is a pickup trip — its Purchase Receipt must be received into {1}'s own vehicle "
+			  "warehouse, not the yard, or the trip can never move past \"Trip Started\". Cancel "
+			  "this receipt and remake it with that warehouse.").format(
+				get_link_to_form("Delivery Trip", trip_name), trip_vehicle or _("the vehicle")
+			),
+			title=_("Wrong Warehouse for Pickup Trip"),
+		)
+
+	po_names = {row.purchase_order for row in doc.items if row.get("purchase_order")}
+
+	updates = {}
+	if not trip_po and len(po_names) == 1:
+		updates["custom_purchase_order"] = po_names.pop()
+	if not trip_pr:
+		updates["custom_purchase_receipt"] = doc.name
+	if updates:
+		frappe.db.set_value("Delivery Trip", trip_name, updates, update_modified=False)
+
+
 def link_shortfall_receipt_to_trip(doc, method=None):
 	"""A third path onto Direct-from-Supplier, alongside `receive_onto_vehicle`
 	and `make_purchase_order` above: dispatch buys the shortfall into the
@@ -520,6 +577,7 @@ def link_shortfall_receipt_to_trip(doc, method=None):
 	)
 	vehicle_rows = [row for row in doc.items if row.warehouse in vehicle_warehouses]
 	if not vehicle_rows:
+		_link_ordinary_receipt_to_waiting_trip(doc)
 		return
 
 	# The PO is traced from the vehicle-warehouse rows specifically, not the
@@ -543,6 +601,25 @@ def link_shortfall_receipt_to_trip(doc, method=None):
 		return
 
 	trip = frappe.get_doc("Delivery Trip", trip_name)
+
+	# A pickup trip (empty truck sent to collect this PO) is not a shortfall
+	# being redirected — it is exactly what it always was, just now loaded.
+	# None of the Direct-from-Supplier flipping below applies: route, supply
+	# source and destination all stay Warehouse to Supplier. Its own status
+	# machine (see PICKUP_ROUTE) takes it from here — "Trip Reached and
+	# Loaded" is the one status this whole app sets automatically rather
+	# than from a button, precisely because this is the moment it becomes
+	# true.
+	from thameen_erp.overrides.delivery_trip import PICKUP_ROUTE
+
+	if trip.custom_trip_route == PICKUP_ROUTE:
+		if trip.docstatus == 1 and trip.status == "Trip Started":
+			frappe.db.set_value(
+				"Delivery Trip", trip_name,
+				{"custom_purchase_receipt": doc.name, "status": "Trip Reached and Loaded"},
+				update_modified=False,
+			)
+		return
 
 	# Already Direct-from-Supplier — this receipt is the one `load_vehicle` /
 	# `receive_onto_vehicle` itself just raised and submitted for that trip,
@@ -748,3 +825,155 @@ def _vehicle_warehouse_or_loading(doc):
 	return doc.get("custom_loading_warehouse") or frappe.db.get_value(
 		"Warehouse", {"company": doc.company, "is_group": 0, "custom_is_vehicle_warehouse": 0}, "name"
 	)
+
+
+# ---------------------------------------------------------------------------
+# A fourth path: send an empty truck to collect a Purchase Order in person
+# ---------------------------------------------------------------------------
+#
+#   Purchase Order submitted -> create_pickup_trip -> Draft pickup trip
+#   Pickup trip submitted    -> "Trip Started" (see update_status)
+#   Its Purchase Receipt submitted, into the truck's own warehouse
+#                             -> "Trip Reached and Loaded" (see
+#                                link_shortfall_receipt_to_trip)
+#   create_trip_after_pickup -> a second, ordinary Delivery Trip, already
+#                                loaded, Direct from Supplier / Decide After
+#                                Loading — the existing Deliver to Customer /
+#                                Deliver to Own Warehouse buttons take it from
+#                                there
+#   Pickup trip, once its own driver confirms arrival back -> "Trip Reached"
+#                                (see _advance_pickup_trip), POD-gated same
+#                                as any other trip's close-out
+#
+# Two separate Delivery Trip records for one physical round trip, on
+# purpose: the pickup leg carries nothing and reports on nothing a cargo
+# trip does (no items, no capacity, no stock check), so folding both into
+# one record would mean every rule in this app second-guessing which half
+# of the journey it is looking at.
+# ---------------------------------------------------------------------------
+
+
+@frappe.whitelist()
+def create_pickup_trip(purchase_order, vehicle, driver=None, departure_time=None):
+	"""An empty truck, sent to collect what a just-submitted Purchase Order
+	bought. No trip items, no stock check — the PO itself is what backs
+	this trip, and nothing is actually loaded until its Purchase Receipt is
+	submitted, at which point this trip moves itself on to "Trip Reached
+	and Loaded" (see `link_shortfall_receipt_to_trip`).
+	"""
+	frappe.has_permission("Delivery Trip", "create", throw=True)
+
+	po = frappe.get_doc("Purchase Order", purchase_order)
+	if po.docstatus != 1:
+		frappe.throw(_("Submit the Purchase Order first."))
+	if po.get("custom_delivery_trip"):
+		frappe.throw(
+			_("{0} is already linked to {1}.").format(
+				po.name, get_link_to_form("Delivery Trip", po.custom_delivery_trip)
+			)
+		)
+
+	vehicle_warehouse = frappe.db.get_value("Vehicle", vehicle, "custom_vehicle_warehouse")
+	if not vehicle_warehouse:
+		frappe.throw(_("{0} has no vehicle warehouse set up — it cannot be sent anywhere.").format(vehicle))
+	if frappe.db.exists("Bin", {"warehouse": vehicle_warehouse, "actual_qty": (">", 0)}):
+		frappe.throw(_("{0} is not empty — a pickup trip needs an empty truck.").format(vehicle))
+
+	from thameen_erp.overrides.delivery_trip import PICKUP_ROUTE
+
+	trip = frappe.new_doc("Delivery Trip")
+	trip.company = po.company
+	trip.custom_supply_source = OWN
+	trip.custom_destination_type = "Supplier"
+	trip.custom_trip_route = PICKUP_ROUTE
+	trip.custom_supplier = po.supplier
+	trip.custom_purchase_order = po.name
+	trip.vehicle = vehicle
+	if driver:
+		trip.driver = driver
+	trip.departure_time = departure_time or now_datetime()
+	trip.flags.ignore_mandatory = True
+	trip.insert()
+
+	# The reverse link — without it, the Purchase Receipt made from this PO
+	# never gets `custom_delivery_trip` carried onto it by Frappe's own
+	# default field-mapping, and `link_shortfall_receipt_to_trip` (which
+	# traces receipt -> PO -> custom_delivery_trip) would have nothing to
+	# trace back to.
+	frappe.db.set_value("Purchase Order", po.name, "custom_delivery_trip", trip.name, update_modified=False)
+
+	frappe.msgprint(
+		_("{0} created for {1} to collect {2}.").format(
+			get_link_to_form("Delivery Trip", trip.name), vehicle, get_link_to_form("Purchase Order", po.name)
+		),
+		indicator="green",
+		alert=True,
+	)
+	return trip.name
+
+
+@frappe.whitelist()
+def create_trip_after_pickup(purchase_receipt):
+	"""The second leg. The truck is already loaded — this receipt is what
+	just put its Purchase Order's goods onto it — so nothing here is asked
+	for by hand: vehicle, driver and item rows all come straight off what
+	is physically on the truck right now. Left Direct from Supplier /
+	Decide After Loading, same as any other trip collected at a supplier's
+	plant with nowhere fixed to go yet — the existing Deliver to Customer /
+	Deliver to Own Warehouse buttons apply unchanged from here.
+	"""
+	frappe.has_permission("Delivery Trip", "create", throw=True)
+
+	from thameen_erp.overrides.delivery_trip import PICKUP_ROUTE
+
+	pr = frappe.get_doc("Purchase Receipt", purchase_receipt)
+	pickup_name = pr.get("custom_delivery_trip")
+	if not pickup_name:
+		frappe.throw(_("This receipt is not linked to a pickup trip."))
+
+	pickup = frappe.get_doc("Delivery Trip", pickup_name)
+	if pickup.custom_trip_route != PICKUP_ROUTE:
+		frappe.throw(_("{0} is not a pickup trip.").format(pickup_name))
+
+	from thameen_erp.overrides.vehicle_stock import get_truck_stock_summary
+
+	truck = get_truck_stock_summary(pickup.vehicle)
+	on_truck = [row for row in (truck.get("items") or []) if flt(row.get("free")) > 0]
+	if not on_truck:
+		frappe.throw(_("{0} has nothing on it yet.").format(pickup.vehicle))
+
+	trip = frappe.new_doc("Delivery Trip")
+	trip.company = pickup.company
+	trip.custom_supply_source = DIRECT
+	trip.custom_destination_type = "Decide After Loading"
+	trip.custom_supplier = pickup.custom_supplier
+	trip.custom_purchase_order = pickup.custom_purchase_order
+	trip.custom_purchase_receipt = pr.name
+	trip.vehicle = pickup.vehicle
+	trip.driver = pickup.driver
+	trip.flags.ignore_mandatory = True
+
+	for row in on_truck:
+		trip.append(
+			"custom_trip_items",
+			{
+				"item_code": row["item_code"],
+				"item_name": row.get("item_name") or row["item_code"],
+				"qty": flt(row["free"]),
+				"uom": row.get("stock_uom"),
+				"stock_uom": row.get("stock_uom"),
+				"conversion_factor": 1,
+				"source_warehouse": truck.get("warehouse"),
+			},
+		)
+
+	trip.insert()
+
+	frappe.msgprint(
+		_("{0} created, already loaded on {1}. Choose Deliver to Customer or Deliver to Own "
+		  "Warehouse once you know where it is going.").format(
+			get_link_to_form("Delivery Trip", trip.name), pickup.vehicle
+		),
+		indicator="green",
+	)
+	return trip.name

@@ -12,6 +12,9 @@ frappe.listview_settings["Delivery Trip"] = {
 		const map = {
 			Draft: "grey", Scheduled: "blue", Loading: "orange", "In Transit": "purple",
 			Delivered: "yellow", "POD Pending": "red", Completed: "green", Cancelled: "grey",
+			// A pickup trip's own three — mirrors the cargo-trip colors one
+			// stage across: Scheduled/blue, Loading/orange, Completed/green.
+			"Trip Started": "blue", "Trip Reached and Loaded": "orange", "Trip Reached": "green",
 		};
 		return [__(doc.status), map[doc.status] || "grey", "status,=," + doc.status];
 	},

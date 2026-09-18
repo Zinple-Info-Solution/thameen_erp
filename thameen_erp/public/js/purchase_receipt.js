@@ -17,6 +17,7 @@ frappe.ui.form.on("Purchase Receipt", {
 		hide_other_receipt_create_buttons(frm);
 		add_delivery_trips_button_unless_vehicle_warehouse(frm);
 		add_waiting_trip_button(frm);
+		add_create_trip_after_pickup_button(frm);
 	},
 
 	// `link_shortfall_receipt_to_trip` (overrides.procurement) links the trip
@@ -31,6 +32,75 @@ frappe.ui.form.on("Purchase Receipt", {
 		frm.reload_doc();
 	},
 });
+
+// This receipt just landed a pickup trip's Purchase Order straight onto its
+// truck — the trip's own status is already "Trip Reached and Loaded" by the
+// time this form loads (see procurement.link_shortfall_receipt_to_trip,
+// which sets that in the same submit this receipt just went through).
+// Nothing here is asked for by hand: vehicle, driver and items all come
+// straight off the truck server-side.
+function add_create_trip_after_pickup_button(frm) {
+	if (!frm.doc.custom_delivery_trip) return;
+
+	frappe.db
+		.get_value("Delivery Trip", frm.doc.custom_delivery_trip, ["custom_trip_route", "status"])
+		.then(({ message }) => {
+			if (!message || message.custom_trip_route !== "Warehouse to Supplier") return;
+			if (message.status !== "Trip Reached and Loaded") return;
+
+			frm.add_custom_button(__("Create Delivery Trip"), () => open_trip_after_pickup_dialog(frm))
+				.addClass("btn-primary");
+		});
+}
+
+function open_trip_after_pickup_dialog(frm) {
+	frappe.db.get_value("Delivery Trip", frm.doc.custom_delivery_trip, "vehicle").then(({ message }) => {
+		const vehicle = message && message.vehicle;
+		frappe.call({
+			method: "thameen_erp.overrides.vehicle_stock.get_truck_stock_summary",
+			args: { vehicle },
+			freeze: true,
+			callback({ message: truck }) {
+				const rows = ((truck && truck.items) || [])
+					.map(
+						(i) => `<tr>
+							<td>${frappe.utils.escape_html(i.item_code)}</td>
+							<td class="text-right">${format_number(i.qty)}</td>
+							<td>${frappe.utils.escape_html(i.stock_uom || "")}</td>
+						</tr>`
+					)
+					.join("");
+
+				const html = `
+					<p>${__("{0} is already loaded — nothing here is edited, this just creates the trip.", [
+						frappe.utils.escape_html(vehicle || __("The vehicle")),
+					])}</p>
+					<table class="table table-bordered small">
+						<thead><tr><th>${__("Item")}</th><th class="text-right">${__("On truck")}</th><th>${__("UOM")}</th></tr></thead>
+						<tbody>${rows}</tbody>
+					</table>`;
+
+				const dialog = new frappe.ui.Dialog({
+					title: __("Create Delivery Trip"),
+					fields: [{ fieldtype: "HTML", options: html }],
+					primary_action_label: __("Create Trip"),
+					primary_action() {
+						frappe.call({
+							method: "thameen_erp.overrides.procurement.create_trip_after_pickup",
+							args: { purchase_receipt: frm.doc.name },
+							freeze: true,
+							callback({ message: trip }) {
+								dialog.hide();
+								if (trip) frappe.set_route("Form", "Delivery Trip", trip);
+							},
+						});
+					},
+				});
+				dialog.show();
+			},
+		});
+	});
+}
 
 // Whether this receipt's stock was bought to fill a specific trip's
 // shortfall (either directly, or via "Material Request instead" that a

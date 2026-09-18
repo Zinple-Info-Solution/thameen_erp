@@ -308,6 +308,56 @@ def vehicle_query(doctype, txt, searchfield, start, page_len, filters):
 	out.sort(key=lambda row: row[0])
 	return out[start : start + page_len]
 
+
+@frappe.whitelist()
+@frappe.validate_and_sanitize_search_inputs
+def empty_vehicle_query(doctype, txt, searchfield, start, page_len, filters):
+	"""Link-field query for a pickup trip's vehicle — a truck sent to collect
+	a Purchase Order must be genuinely empty, not just uncommitted. Same
+	availability/booking rules as `vehicle_query`, plus the one this exists
+	for: nothing at all in its warehouse right now.
+	"""
+	from thameen_erp.overrides.vehicle_load import (
+		PLANNABLE_STATUSES,
+		is_configured_truck,
+		vehicles_booked_on_other_trips,
+	)
+
+	filters = filters or {}
+	exclude_trip = filters.get("trip")
+
+	conditions = {"custom_status": ("in", list(PLANNABLE_STATUSES))}
+	if txt:
+		conditions["name"] = ("like", f"%{txt}%")
+
+	vehicles = frappe.get_all(
+		"Vehicle",
+		filters=conditions,
+		fields=["name", "custom_capacity", "custom_status", "custom_vehicle_warehouse"],
+		order_by="name",
+		limit_page_length=0,
+	)
+	vehicles = [v for v in vehicles if is_configured_truck(v.custom_capacity, v.custom_vehicle_warehouse)]
+
+	booked = vehicles_booked_on_other_trips([v.name for v in vehicles], exclude_trip=exclude_trip)
+	vehicles = [v for v in vehicles if v.name not in booked]
+
+	warehouses = [v.custom_vehicle_warehouse for v in vehicles if v.custom_vehicle_warehouse]
+	occupied = set()
+	if warehouses:
+		occupied = {
+			row.warehouse
+			for row in frappe.get_all(
+				"Bin", filters={"warehouse": ("in", warehouses), "actual_qty": (">", 0)}, fields=["warehouse"]
+			)
+		}
+	vehicles = [v for v in vehicles if v.custom_vehicle_warehouse not in occupied]
+
+	out = [(v.name, v.custom_status or "") for v in vehicles]
+	out.sort(key=lambda row: row[0])
+	return out[start : start + page_len]
+
+
 # ---------------------------------------------------------------------------
 # Manual load / unload from the Vehicle form
 # ---------------------------------------------------------------------------

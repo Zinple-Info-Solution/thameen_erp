@@ -7,6 +7,8 @@ every `after_migrate`, so it is safe to re-run. We deliberately use
 because deletion drops the underlying column and loses data.
 """
 
+import json
+
 import frappe
 from frappe.custom.doctype.custom_field.custom_field import create_custom_fields
 from frappe.custom.doctype.property_setter.property_setter import make_property_setter
@@ -44,6 +46,41 @@ TRIP_ROUTES = [
 	"Supplier to Customer",
 	"Supplier to Warehouse",
 	"Supplier to Decide After Loading",
+	# An empty truck going TO a supplier to collect a Purchase Order, not
+	# carrying anything from one — the reverse leg of "Supplier to
+	# Warehouse". Its own short status lifecycle (see PICKUP_ROUTE in
+	# overrides.delivery_trip) reflects that: no Loading step, because
+	# nothing was ever in a yard to load.
+	"Warehouse to Supplier",
+]
+
+# Dispatch reads top to bottom: the route decision first, then who's
+# carrying it, then when, then what — everything a dispatcher never opens
+# (odometer, distance, cost center, the old geocoded-stop table) sinks to
+# the tail. Every fieldname the doctype has — standard and custom alike —
+# must appear here exactly once; nothing is added or removed, only moved.
+DELIVERY_TRIP_FIELD_ORDER = [
+	"naming_series", "company", "column_break_2", "email_notification_sent",
+	"custom_trip_section", "custom_trip_route", "custom_sales_order", "custom_delivery_location",
+	"custom_trip_col_break", "custom_supplier", "custom_purchase_order", "custom_purchase_receipt",
+	"custom_target_warehouse",
+	"section_break_3", "vehicle", "custom_vehicle_warehouse",
+	"driver", "driver_name", "driver_email", "driver_address",
+	"column_break_4", "departure_time", "custom_external_transporter", "employee",
+	"custom_items_section", "custom_trip_items",
+	"custom_pod_section", "custom_pod_documents", "custom_pod_received",
+	"section_break_15", "status", "cb_more_info", "amended_from",
+	# Hidden fields below — order is irrelevant to what renders, kept
+	# grouped by topic purely so the list itself stays readable.
+	"custom_loading_warehouse", "custom_item", "custom_planned_qty", "custom_delivered_qty",
+	"custom_trip_type", "custom_supply_source", "custom_destination_type", "custom_trip_source",
+	"custom_supplier_warehouse", "custom_customer_warehouse",
+	"custom_trip_start", "custom_trip_end", "custom_trip_duration_hours",
+	"custom_starting_odometer", "custom_ending_odometer",
+	"custom_transportation_cost", "custom_transportation_item", "custom_cost_center",
+	"total_distance", "uom",
+	"delivery_service_stops", "delivery_stops",
+	"calculate_arrival_time", "optimize_route",
 ]
 
 CREDIT_NOTE_STATUS = "\n".join(
@@ -540,7 +577,7 @@ def get_custom_fields() -> dict:
 				"fieldname": "custom_destination_type",
 				"label": "Destination",
 				"fieldtype": "Select",
-				"options": "Customer\nOwn Warehouse\nDecide After Loading",
+				"options": "Customer\nOwn Warehouse\nDecide After Loading\nSupplier",
 				"default": "Customer",
 				"read_only": 1,
 				"allow_on_submit": 1,
@@ -1204,12 +1241,16 @@ def _unrequire_stray_custom_fields():
 def _apply_property_setters():
 	"""Small UX tweaks on standard doctypes."""
 	setters = [
-		# Delivery Trip status gains the states the cement flow needs.
+		# Delivery Trip status gains the states the cement flow needs, plus
+		# the pickup leg's own three (see PICKUP_LIFECYCLE in
+		# overrides.delivery_trip) — grouped right after Draft since a
+		# pickup trip never passes through any of Scheduled..Completed.
 		(
 			"Delivery Trip",
 			"status",
 			"options",
-			"Draft\nScheduled\nLoading\nIn Transit\nDelivered\nPOD Pending\nCompleted\nCancelled",
+			"Draft\nTrip Started\nTrip Reached and Loaded\nTrip Reached\n"
+			"Scheduled\nLoading\nIn Transit\nDelivered\nPOD Pending\nCompleted\nCancelled",
 			"Text",
 		),
 		# `total_distance` is recomputed from the odometer readings, which are
@@ -1308,6 +1349,11 @@ def _apply_property_setters():
 				"custom_transportation_cost",
 				"custom_transportation_item",
 				"custom_supplier_warehouse",
+				# The section header itself — hiding a Section Break hides
+				# everything under it up to the next one, so this takes the
+				# "Delivery Stop" table with it. Dispatch here plans against
+				# Sales Order lines, not geocoded map stops.
+				"delivery_service_stops",
 			)
 		],
 		# ------------------------------------------------------------------
@@ -1387,6 +1433,35 @@ def _apply_property_setters():
 			)
 		except Exception:
 			frappe.log_error(frappe.get_traceback(), "Thameen ERP Property Setter")
+
+	_apply_delivery_trip_field_order()
+
+
+def _apply_delivery_trip_field_order():
+	"""Reorder the Delivery Trip form via the same `field_order` Property
+	Setter Customize Form's own drag-and-drop reordering writes — never
+	applied if the hand-written list above and the doctype's actual fields
+	have drifted apart (a field added or removed since), so a stale list
+	can only fail loud, never quietly drop a field off the form.
+	"""
+	actual = {df.fieldname for df in frappe.get_meta("Delivery Trip").fields}
+	wanted = set(DELIVERY_TRIP_FIELD_ORDER)
+
+	if actual != wanted:
+		frappe.log_error(
+			f"Delivery Trip field_order list is out of date — missing {wanted - actual}, "
+			f"unknown {actual - wanted}. Not applied; update DELIVERY_TRIP_FIELD_ORDER in install.py.",
+			"Thameen ERP Property Setter",
+		)
+		return
+
+	try:
+		make_property_setter(
+			"Delivery Trip", None, "field_order", json.dumps(DELIVERY_TRIP_FIELD_ORDER), "Small Text",
+			for_doctype=True,
+		)
+	except Exception:
+		frappe.log_error(frappe.get_traceback(), "Thameen ERP Property Setter")
 
 
 # ---------------------------------------------------------------------------

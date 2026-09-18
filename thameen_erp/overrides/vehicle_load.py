@@ -45,6 +45,11 @@ from thameen_erp.overrides.trip_split import (
 # Submitted trips in these states are holding space on the truck.
 COMMITTED_STATES = ("Scheduled", "Loading", "In Transit")
 
+# A pickup trip's own two "still out there" statuses — "Trip Reached" is
+# deliberately excluded, same as "Delivered"/"Completed" are for a cargo
+# trip: the truck is back, free to be booked again.
+PICKUP_COMMITTED_STATES = ("Trip Started", "Trip Reached and Loaded")
+
 # ---------------------------------------------------------------------------
 # Which trucks a picker may offer
 # ---------------------------------------------------------------------------
@@ -62,7 +67,7 @@ COMMITTED_STATES = ("Scheduled", "Loading", "In Transit")
 #     offered at all. Draft trips do NOT book a truck — an abandoned draft
 #     should not quietly take a truck out of circulation.
 PLANNABLE_STATUSES = ("Available", "Assigned", "On Trip")
-BOOKED_TRIP_STATES = COMMITTED_STATES
+BOOKED_TRIP_STATES = COMMITTED_STATES + PICKUP_COMMITTED_STATES
 
 
 def vehicles_booked_on_other_trips(vehicles, exclude_trip=None):
@@ -119,6 +124,39 @@ def drivers_booked_on_other_trips(drivers, exclude_trip=None):
 			continue
 		booked.setdefault(row.driver, row.name)
 	return booked
+
+
+@frappe.whitelist()
+@frappe.validate_and_sanitize_search_inputs
+def driver_query(doctype, txt, searchfield, start, page_len, filters):
+	"""Link-field query for Delivery Trip.driver — the main form, not just the
+	planning dialogs. A driver already out on another open trip (Scheduled,
+	Loading, In Transit) is not offered, same rule and same reason as
+	`vehicle_query`: he is out driving it, not free to be handed a second one.
+
+	This replaces ERPNext core's own `driver` query outright (Frappe keeps
+	only the last-registered one per field), which filtered to `status =
+	Active` and nothing else — kept here too, as a default, so a resigned
+	driver does not reappear just because this file loaded after core's.
+
+	Pass `trip` so the trip being edited does not count against its own
+	driver.
+	"""
+	filters = dict(filters or {})
+	exclude_trip = filters.pop("trip", None)
+	filters.setdefault("status", "Active")
+
+	drivers = frappe.get_all("Driver", filters=filters, fields=["name", "full_name"], limit_page_length=0)
+	booked = drivers_booked_on_other_trips([d.name for d in drivers], exclude_trip=exclude_trip)
+
+	needle = (txt or "").lower()
+	out = [
+		(d.name, d.full_name or "")
+		for d in drivers
+		if d.name not in booked
+		and (not needle or needle in (d.name or "").lower() or needle in (d.full_name or "").lower())
+	]
+	return out[start : start + page_len]
 
 
 def is_configured_truck(capacity, warehouse):

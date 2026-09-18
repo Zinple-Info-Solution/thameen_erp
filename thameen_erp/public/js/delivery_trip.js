@@ -7,6 +7,7 @@ const ROUTE_MAP = {
 	"Supplier to Customer": ["Direct from Supplier", "Customer"],
 	"Supplier to Warehouse": ["Direct from Supplier", "Own Warehouse"],
 	"Supplier to Decide After Loading": ["Direct from Supplier", "Decide After Loading"],
+	"Warehouse to Supplier": ["Own Warehouse", "Supplier"],
 };
 
 const NEXT_STATUS = {
@@ -21,6 +22,17 @@ const STAGE_HINT = {
 	Loading: __("This raises a Material Transfer from the loading warehouse onto the vehicle warehouse."),
 	Delivered: __("This raises the Delivery Note(s) from the vehicle warehouse against the Sales Order."),
 	Completed: __("This releases the vehicle and closes the Sales Order if it is fully delivered."),
+};
+
+// An empty truck sent to collect a Purchase Order in person has its own,
+// much shorter lifecycle — no Loading (nothing was ever in a yard), no
+// Delivery Note. Mirrors PICKUP_ROUTE / PICKUP_NEXT_STATUS in
+// overrides/delivery_trip.py.
+const PICKUP_ROUTE = "Warehouse to Supplier";
+
+const PICKUP_NEXT_STATUS = {
+	"Trip Started": "Trip Reached and Loaded",
+	"Trip Reached and Loaded": "Trip Reached",
 };
 
 frappe.ui.form.on("Delivery Trip", {
@@ -55,6 +67,15 @@ frappe.ui.form.on("Delivery Trip", {
 			},
 		}));
 
+		// Same exclusivity rule as the vehicle picker: a driver already out on
+		// another open trip is not offered here either.
+		frm.set_query("driver", () => ({
+			query: "thameen_erp.overrides.vehicle_load.driver_query",
+			filters: {
+				trip: frm.is_new() ? null : frm.doc.name,
+			},
+		}));
+
 		frm.set_query("custom_purchase_order", () => ({
 			filters: {
 				docstatus: ["<", 2],
@@ -84,6 +105,20 @@ frappe.ui.form.on("Delivery Trip", {
 	},
 
 	refresh(frm) {
+		if (frm.doc.custom_trip_route === PICKUP_ROUTE) {
+			frm.dashboard.add_comment(
+				__("Pickup trip: an empty {0} sent to collect {1} in person. No Loading step — nothing was ever in a yard to load — this trip only carries what its Purchase Receipt puts on it.", [
+					frappe.utils.escape_html(frm.doc.vehicle || __("vehicle")),
+					frappe.utils.escape_html(frm.doc.custom_supplier || __("the supplier")),
+				]),
+				"blue",
+				true
+			);
+			add_procurement_buttons(frm);
+			if (frm.doc.docstatus === 1) add_pickup_status_button(frm);
+			return;
+		}
+
 		add_destination_buttons(frm);
 		if (frm.doc.custom_destination_type === "Decide After Loading") {
 			frm.dashboard.add_comment(
@@ -173,38 +208,95 @@ frappe.ui.form.on("Delivery Trip", {
 		if (s && e && e >= s) frm.set_value("total_distance", e - s);
 	},
 
-	// The server already refuses to submit a trip the yard cannot fill (see
-	// _validate_stock_available) — but that only ever surfaces as a plain
-	// error after the dispatcher has already clicked Submit. Check first and,
-	// if short, open the same procurement dialog Check Stock uses, so the
-	// fix is one click away instead of a second trip back to this form.
-	// There is no way to submit past this — insufficient stock always
-	// cancels the submit, whichever way the dialog is closed.
+	// The server refuses to submit a trip that is either over the vehicle's
+	// capacity (_validate_vehicle_capacity) or short of stock
+	// (_validate_stock_available) — but both only ever surfaced as a plain
+	// error after the dispatcher had already clicked Submit. Check capacity
+	// first (its own fix — Split Trip — is a different action from the
+	// stock one), then stock, opening whichever dialog actually helps
+	// instead of a blunt error and a second trip back to this form.
 	// Returning a Promise here makes Frappe wait for it before deciding
 	// whether the submit actually proceeds (see script_manager.trigger).
 	before_submit(frm) {
 		if (frm.doc.custom_supply_source === "Direct from Supplier") return;
 		if (!(frm.doc.custom_trip_items || []).length) return;
+		if (!frm.doc.vehicle) return;
 
 		return new Promise((resolve) => {
 			frappe.call({
-				method: "thameen_erp.overrides.procurement.check_trip_stock",
-				args: { trip: frm.doc.name, vehicle: frm.doc.vehicle },
+				method: "thameen_erp.overrides.vehicle_load.get_vehicle_load",
+				args: { vehicle: frm.doc.vehicle, trip: frm.doc.name },
 				freeze: true,
-				freeze_message: __("Checking stock…"),
-				callback({ message }) {
-					if (!message || message.sufficient) {
-						resolve();
+				freeze_message: __("Checking capacity…"),
+				callback({ message: load }) {
+					if (load && load.has_capacity && !load.fits) {
+						frappe.validated = false;
+						offer_capacity_split(frm, load, resolve);
 						return;
 					}
-					frappe.validated = false;
-					offer_procurement(frm, message, { on_close: resolve });
+					check_stock_before_submit(frm, resolve);
 				},
-				error: () => resolve(),
+				error: () => check_stock_before_submit(frm, resolve),
 			});
 		});
 	},
 });
+
+function check_stock_before_submit(frm, resolve) {
+	frappe.call({
+		method: "thameen_erp.overrides.procurement.check_trip_stock",
+		args: { trip: frm.doc.name, vehicle: frm.doc.vehicle },
+		freeze: true,
+		freeze_message: __("Checking stock…"),
+		callback({ message }) {
+			if (!message || message.sufficient) {
+				resolve();
+				return;
+			}
+			frappe.validated = false;
+			offer_procurement(frm, message, { on_close: resolve });
+		},
+		error: () => resolve(),
+	});
+}
+
+// The plain "cannot carry this trip" error told the dispatcher to use
+// Split Into Trips, then made them go find that button themselves. This
+// puts it one click away instead — same numbers, same remedy, just with
+// the fix attached to the message rather than left as an instruction.
+function offer_capacity_split(frm, load, resolve) {
+	let closed = false;
+	const close = () => {
+		if (closed) return;
+		closed = true;
+		resolve();
+	};
+
+	const dialog = new frappe.ui.Dialog({
+		title: __("Over Capacity"),
+		fields: [
+			{
+				fieldtype: "HTML",
+				options: `<p>${__(
+					"{0} can only take {1} of this trip's {2} — {3} over. Split it across trucks instead of typing a smaller quantity by hand.",
+					[
+						frappe.utils.escape_html(frm.doc.vehicle),
+						format_number(load.available_qty),
+						format_number(load.planned_qty),
+						format_number(load.overflow_qty),
+					]
+				)}</p>`,
+			},
+		],
+		primary_action_label: __("Split Trip"),
+		primary_action() {
+			dialog.hide();
+			offer_split(frm, load);
+		},
+	});
+	dialog.onhide = close;
+	dialog.show();
+}
 
 frappe.ui.form.on("Delivery Trip Item", {
 	item_code(frm, cdt, cdn) {
@@ -350,6 +442,26 @@ function apply_rows(frm, rows) {
 			if (on) frm.save();
 		});
 	}
+}
+
+// "Trip Reached and Loaded" happens on its own the moment the pickup trip's
+// Purchase Receipt is submitted (see procurement.link_shortfall_receipt_to_trip)
+// — no button for it. The one manual step left is confirming the truck is
+// actually back, POD-gated server-side the same way Completed is for an
+// ordinary trip.
+function add_pickup_status_button(frm) {
+	const next = PICKUP_NEXT_STATUS[frm.doc.status];
+	if (!next || next === "Trip Reached and Loaded") return;
+
+	frm.page.set_primary_action(__("Mark {0}", [next]), () => {
+		frappe.call({
+			method: "thameen_erp.overrides.delivery_trip.set_trip_status",
+			args: { trip: frm.doc.name, status: next },
+			freeze: true,
+			freeze_message: __("Updating trip…"),
+			callback: () => frm.reload_doc(),
+		});
+	});
 }
 
 function add_status_buttons(frm) {
@@ -1673,6 +1785,31 @@ function offer_procurement(frm, check, opts) {
 	dialog.show();
 }
 
+// Nothing on the trip itself points at a Purchase Invoice — that document
+// only ever comes from the Purchase Order or Receipt the trip is already
+// linked to, so a quick lookup rather than a stored field, done on refresh
+// rather than kept in sync some other way.
+function add_purchase_invoice_button(frm) {
+	const receipt = frm.doc.custom_purchase_receipt;
+	const order = frm.doc.custom_purchase_order;
+	if (!receipt && !order) return;
+
+	frappe.db
+		.get_list("Purchase Invoice Item", {
+			filters: receipt ? { purchase_receipt: receipt, docstatus: 1 } : { purchase_order: order, docstatus: 1 },
+			fields: ["parent"],
+			limit: 1,
+		})
+		.then((rows) => {
+			if (!rows || !rows.length) return;
+			frm.add_custom_button(
+				rows[0].parent,
+				() => frappe.set_route("Form", "Purchase Invoice", rows[0].parent),
+				__("View")
+			);
+		});
+}
+
 function add_procurement_buttons(frm) {
 	if (frm.is_new()) return;
 
@@ -1692,6 +1829,7 @@ function add_procurement_buttons(frm) {
 			__("View")
 		);
 	}
+	add_purchase_invoice_button(frm);
 
 	if (frm.doc.docstatus !== 0) return;
 

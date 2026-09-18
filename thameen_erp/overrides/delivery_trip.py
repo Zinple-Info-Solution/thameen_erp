@@ -63,6 +63,24 @@ NEXT_STATUS = {
 
 TERMINAL_STATES = ("Completed", "Cancelled")
 
+# A pickup trip carries nothing at all when it leaves — it exists purely to
+# get an empty truck to a supplier and back with a Purchase Receipt to show
+# for it. No Loading step (there was never anything in a yard to load), no
+# Delivery Note, no Sales Order — so it gets its own, much shorter lifecycle
+# instead of forcing it through the cargo-carrying one above.
+PICKUP_ROUTE = "Warehouse to Supplier"
+
+PICKUP_LIFECYCLE = (
+	"Trip Started",
+	"Trip Reached and Loaded",
+	"Trip Reached",
+)
+
+PICKUP_NEXT_STATUS = {
+	"Trip Started": "Trip Reached and Loaded",
+	"Trip Reached and Loaded": "Trip Reached",
+}
+
 # One field, one journey. Supply Source and Destination remain the fields every
 # rule reads — this map is the only place the pairing is written down. Keep it
 # in step with TRIP_ROUTES in thameen_erp.install.
@@ -71,6 +89,7 @@ ROUTE_MAP = {
 	"Supplier to Customer": ("Direct from Supplier", "Customer"),
 	"Supplier to Warehouse": ("Direct from Supplier", "Own Warehouse"),
 	"Supplier to Decide After Loading": ("Direct from Supplier", "Decide After Loading"),
+	PICKUP_ROUTE: ("Own Warehouse", "Supplier"),
 }
 
 ROUTE_OF_PAIR = {pair: route for route, pair in ROUTE_MAP.items()}
@@ -98,6 +117,7 @@ class ThameenDeliveryTrip(DeliveryTrip):
 		self._validate_trip_qty()
 		self._validate_vehicle_capacity()
 		self._validate_vehicle_item_conflict()
+		self._validate_pickup_vehicle_empty()
 		self._validate_stock_available()
 		self._validate_transport_type()
 		self._fill_supplier_from_po_or_receipt()
@@ -346,7 +366,9 @@ class ThameenDeliveryTrip(DeliveryTrip):
 		if self._action == "submit":
 			# `vehicle` is deliberately optional at draft so a trip can be planned
 			# before dispatch picks a truck. It becomes mandatory to submit.
-			if not rows:
+			# A pickup trip carries nothing when it leaves — there is nothing to
+			# put a row against yet — so it is exempt from needing one.
+			if not rows and self.get("custom_trip_route") != PICKUP_ROUTE:
 				frappe.throw(_("Add at least one row to Trip Items before submitting."))
 			if not self.get("vehicle"):
 				frappe.throw(_("Assign a Vehicle before submitting the trip."))
@@ -575,6 +597,39 @@ class ThameenDeliveryTrip(DeliveryTrip):
 			title=_("Different Item on Truck"),
 		)
 
+	def _validate_pickup_vehicle_empty(self):
+		"""A pickup trip's whole point is an EMPTY truck going to collect
+		something — the vehicle picker already offers only empty trucks, but
+		one could still be loaded by hand between planning and submit, so
+		the rule is enforced here too, same reasoning as the item-conflict
+		check right above.
+
+		Only at submit: a draft may name a truck someone is still unloading.
+		"""
+		if self._action != "submit" or not self.get("vehicle"):
+			return
+		if self.get("custom_trip_route") != PICKUP_ROUTE:
+			return
+
+		warehouse = frappe.db.get_value("Vehicle", self.vehicle, "custom_vehicle_warehouse")
+		if not warehouse:
+			return
+
+		on_truck = frappe.get_all(
+			"Bin", filters={"warehouse": warehouse, "actual_qty": (">", 0)}, fields=["item_code", "actual_qty"]
+		)
+		if not on_truck:
+			return
+
+		frappe.throw(
+			_("{0} already has {1} on it — a pickup trip needs an empty truck. Unload it first, "
+			  "or choose another vehicle.").format(
+				frappe.bold(self.vehicle),
+				", ".join(f"{row.item_code} {flt(row.actual_qty, 2)}" for row in on_truck),
+			),
+			title=_("Truck Not Empty"),
+		)
+
 	def _validate_stock_available(self):
 		"""A trip may not be submitted unless the cement is already ON THE
 		TRUCK — the yard having plenty of it does not count, even though
@@ -750,6 +805,12 @@ class ThameenDeliveryTrip(DeliveryTrip):
 			self.custom_trip_source = "Manual"
 
 	def _validate_destination(self):
+		if self.get("custom_destination_type") == "Supplier":
+			if self.get("custom_trip_route") != PICKUP_ROUTE:
+				frappe.throw(_("Destination 'Supplier' only makes sense on a Warehouse to Supplier trip."))
+			if not self.get("custom_supplier"):
+				frappe.throw(_("Choose the Supplier this trip is going to collect from."))
+			return
 		if self.get("custom_destination_type") == "Decide After Loading":
 			if self.get("custom_supply_source") != "Direct from Supplier":
 				frappe.throw(
@@ -884,6 +945,8 @@ class ThameenDeliveryTrip(DeliveryTrip):
 			status = "Draft"
 		elif self.docstatus == 2:
 			status = "Cancelled"
+		elif self.get("custom_trip_route") == PICKUP_ROUTE:
+			status = self.status if self.status in PICKUP_LIFECYCLE else "Trip Started"
 		else:
 			status = self.status if self.status in LIFECYCLE else "Scheduled"
 
@@ -1407,6 +1470,9 @@ def set_trip_status(trip, status):
 	if doc.docstatus != 1:
 		frappe.throw(_("Submit the trip before changing its status."))
 
+	if doc.get("custom_trip_route") == PICKUP_ROUTE:
+		return _advance_pickup_trip(doc, status)
+
 	current = doc.status if doc.status in LIFECYCLE else "Scheduled"
 	if status != NEXT_STATUS.get(current):
 		frappe.throw(
@@ -1443,6 +1509,35 @@ def set_trip_status(trip, status):
 		doc.reload()
 		doc.close_trip()
 
+	return status
+
+
+def _advance_pickup_trip(doc, status):
+	"""The pickup leg's own, three-step lifecycle. "Trip Started" is set
+	automatically on submit (see `update_status`); "Trip Reached and Loaded"
+	fires on its own too, the moment the Purchase Receipt for what it
+	collected is submitted (see `procurement.link_shortfall_receipt_to_trip`)
+	— nobody clicks a button for either. The one manual step left is this
+	one: confirming the truck is actually back, which is also where POD
+	closes this trip out, same rule as an outbound trip's own Completed step.
+	"""
+	current = doc.status if doc.status in PICKUP_LIFECYCLE else "Trip Started"
+	if status != PICKUP_NEXT_STATUS.get(current):
+		frappe.throw(
+			_("{0} cannot move straight to {1}. The next step is {2}.").format(
+				current, status, PICKUP_NEXT_STATUS.get(current) or _("none — the trip is finished")
+			)
+		)
+
+	if status == "Trip Reached and Loaded" and not doc.get("custom_purchase_receipt"):
+		frappe.throw(
+			_("Submit the Purchase Receipt for what this trip collected before marking it loaded.")
+		)
+
+	if status == "Trip Reached" and _pod_required() and not doc.get("custom_pod_received"):
+		frappe.throw(_("Attach at least one Proof of Delivery document before closing this trip."))
+
+	doc.db_set("status", status)
 	return status
 
 
