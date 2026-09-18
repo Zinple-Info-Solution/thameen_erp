@@ -113,7 +113,10 @@ doc_events = {
 			"thameen_erp.overrides.procurement.purchase_receipt_on_cancel",
 			"thameen_erp.overrides.vehicle_stock.refresh_vehicle_loads_for_doc",
 		],
-		"validate": "thameen_erp.overrides.vehicle_stock.validate_vehicle_warehouse_capacity",
+		"validate": [
+			"thameen_erp.overrides.vehicle_stock.validate_vehicle_warehouse_capacity",
+			"thameen_erp.overrides.procurement.validate_pickup_receipt_warehouse",
+		],
 	},
 	# A vehicle warehouse is the truck, so it cannot hold more than the truck
 	# is rated for. The manual Load dialog checked this already; these are the

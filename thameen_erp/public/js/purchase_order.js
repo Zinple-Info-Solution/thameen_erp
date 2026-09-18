@@ -133,7 +133,9 @@ function draw_pickup_plan(dialog, plan, pending, vehicle_opts, driver_opts) {
 				<td>${i + 1}</td>
 				<td><select class="form-control input-xs pk-vehicle" data-i="${i}">${vehicle_select(r.vehicle, i)}</select></td>
 				<td><input type="text" inputmode="decimal" class="form-control input-xs pk-qty no-spin" data-i="${i}" value="${r.qty}" style="width:100px"></td>
-				<td><select class="form-control input-xs pk-driver" data-i="${i}">${driver_select(r.driver, i)}</select></td>
+				<td><select class="form-control input-xs pk-driver" data-i="${i}" ${r.vehicle ? "" : "disabled"} title="${
+					r.vehicle ? "" : frappe.utils.escape_html(__("Choose a vehicle first"))
+				}">${driver_select(r.driver, i)}</select></td>
 				<td><input type="date" class="form-control input-xs pk-date" data-i="${i}" value="${date}" style="width:120px"></td>
 				<td><input type="time" class="form-control input-xs pk-time" data-i="${i}" value="${time}" style="width:90px"></td>
 				<td><a class="text-danger small pk-remove" data-i="${i}">${__("remove")}</a></td>
@@ -166,6 +168,7 @@ function draw_pickup_plan(dialog, plan, pending, vehicle_opts, driver_opts) {
 	wrapper.find(".pk-vehicle").on("change", function () {
 		const i = parseInt($(this).data("i"), 10);
 		plan[i].vehicle = $(this).val() || null;
+		if (!plan[i].vehicle) plan[i].driver = null;
 		const cap = capacity_of(plan[i].vehicle);
 		if (cap && flt(plan[i].qty) > cap) plan[i].qty = cap;
 		draw_pickup_plan(dialog, plan, pending, vehicle_opts, driver_opts);

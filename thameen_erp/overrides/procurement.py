@@ -529,6 +529,169 @@ def _link_ordinary_receipt_to_waiting_trip(doc):
 		frappe.db.set_value("Delivery Trip", trip_name, updates, update_modified=False)
 
 
+def _open_pickup_trips_for_pos(po_names):
+	"""{vehicle: {trip, warehouse, driver, purchase_order}} for every pickup
+	trip still waiting on its receipt (Trip Started) against one of these
+	Purchase Orders — the candidates a receipt's own Pickup Vehicles table
+	may name. `driver` is shown there purely for visibility — it was already
+	fixed when the pickup trip was created and submitted, nothing to pick
+	again on the receipt."""
+	po_names = [p for p in (po_names or []) if p]
+	if not po_names:
+		return {}
+
+	from thameen_erp.overrides.delivery_trip import PICKUP_ROUTE
+
+	trips = frappe.get_all(
+		"Delivery Trip",
+		filters={
+			"custom_trip_route": PICKUP_ROUTE,
+			"custom_purchase_order": ("in", po_names),
+			"docstatus": 1,
+			"status": "Trip Started",
+		},
+		fields=["name", "vehicle", "driver", "custom_purchase_order"],
+	)
+	if not trips:
+		return {}
+
+	warehouses = {
+		v.name: v.custom_vehicle_warehouse
+		for v in frappe.get_all(
+			"Vehicle", filters={"name": ("in", [t.vehicle for t in trips])}, fields=["name", "custom_vehicle_warehouse"]
+		)
+	}
+	return {
+		t.vehicle: {
+			"trip": t.name,
+			"warehouse": warehouses.get(t.vehicle),
+			"driver": t.driver,
+			"purchase_order": t.custom_purchase_order,
+		}
+		for t in trips
+	}
+
+
+@frappe.whitelist()
+def pickup_vehicles_for_pos(purchase_orders):
+	"""Every vehicle with an open pickup trip against these Purchase Orders —
+	for the Purchase Receipt's own "Add Pickup Vehicles" button, so filling in
+	its Pickup Vehicles table is one click instead of hunting down which
+	trucks are out for which PO."""
+	if isinstance(purchase_orders, str):
+		purchase_orders = json.loads(purchase_orders or "[]")
+	found = _open_pickup_trips_for_pos(purchase_orders)
+	return [
+		{"vehicle": vehicle, "delivery_trip": info["trip"], "driver": info["driver"], "warehouse": info["warehouse"]}
+		for vehicle, info in found.items()
+	]
+
+
+@frappe.whitelist()
+@frappe.validate_and_sanitize_search_inputs
+def pickup_vehicle_query(doctype, txt, searchfield, start, page_len, filters):
+	"""Link-field query for a Purchase Receipt Pickup Vehicle row's `vehicle`
+	— only trucks with an open pickup trip against one of this receipt's own
+	Purchase Orders are offered, same reasoning as `empty_vehicle_query`:
+	picking the wrong truck should not even be possible."""
+	filters = filters or {}
+	po_names = filters.get("purchase_orders") or []
+	if isinstance(po_names, str):
+		po_names = json.loads(po_names or "[]")
+
+	found = _open_pickup_trips_for_pos(po_names)
+	needle = (txt or "").lower()
+	out = [
+		(vehicle, f"→ {info['trip']}")
+		for vehicle, info in found.items()
+		if not needle or needle in vehicle.lower()
+	]
+	out.sort(key=lambda row: row[0])
+	return out[start : start + page_len]
+
+
+@frappe.whitelist()
+def pickup_trip_for_vehicle(vehicle, purchase_orders):
+	"""The open pickup trip (and its warehouse) this vehicle is actually out
+	on, scoped to this receipt's own Purchase Order(s) — what a Purchase
+	Receipt Pickup Vehicle row auto-fills the moment its Vehicle is picked."""
+	if isinstance(purchase_orders, str):
+		purchase_orders = json.loads(purchase_orders or "[]")
+	found = _open_pickup_trips_for_pos(purchase_orders)
+	return found.get(vehicle)
+
+
+def validate_pickup_receipt_warehouse(doc, method=None):
+	"""A receipt covering a pickup trip's Purchase Order must name every
+	vehicle it is settling in its own Pickup Vehicles table, and every item
+	row against that PO must land in that vehicle's own warehouse — checked
+	here, before submit, instead of leaving `_link_ordinary_receipt_to_waiting_trip`
+	to catch a wrong warehouse only after the fact.
+
+	One receipt can cover several trucks at once (the user does not want a
+	separate Purchase Receipt per vehicle) — so this is a many-to-many check:
+	every pickup PO referenced by an item row needs at least one matching
+	Pickup Vehicles row, and every item row's warehouse must be one of the
+	warehouses named for ITS OWN Purchase Order, not just any of them.
+	"""
+	if doc._action != "submit":
+		return
+
+	po_names = list({row.purchase_order for row in doc.items if row.get("purchase_order")})
+	if not po_names:
+		return
+
+	open_trips = _open_pickup_trips_for_pos(po_names)
+	pickup_pos = {info["purchase_order"] for info in open_trips.values()}
+	if not pickup_pos:
+		return
+
+	chosen = {row.warehouse: row.purchase_order for row in _pickup_vehicle_rows(doc, open_trips)}
+
+	missing_pos = sorted(pickup_pos - set(chosen.values()))
+	if missing_pos:
+		frappe.throw(
+			_("This receipt covers a pickup trip's Purchase Order ({0}) but no vehicle for it is listed "
+			  "in Pickup Vehicles below. Add the truck(s) it is for before submitting.").format(
+				", ".join(missing_pos)
+			),
+			title=_("Pickup Vehicle Missing"),
+		)
+
+	errors = []
+	for row in doc.items:
+		if row.purchase_order not in pickup_pos:
+			continue
+		if chosen.get(row.warehouse) != row.purchase_order:
+			allowed = sorted(wh for wh, po in chosen.items() if po == row.purchase_order)
+			errors.append(
+				_("Row {0} ({1}): must be received into {2}, not {3}.").format(
+					row.idx, row.item_code, " or ".join(allowed) or _("a Pickup Vehicle's warehouse"), row.warehouse or _("(blank)")
+				)
+			)
+
+	if errors:
+		frappe.throw(
+			"<br>".join(errors),
+			title=_("Wrong Warehouse for Pickup Trip"),
+		)
+
+
+def _pickup_vehicle_rows(doc, open_trips):
+	"""Validate + resolve the receipt's own Pickup Vehicles table against
+	`open_trips` (vehicle -> {trip, warehouse, purchase_order}), throwing on
+	anything that does not actually match a real open pickup trip."""
+	for row in doc.get("custom_pickup_vehicles") or []:
+		info = open_trips.get(row.vehicle)
+		if not info:
+			frappe.throw(
+				_("Pickup Vehicles row {0}: {1} has no open pickup trip against this receipt's "
+				  "Purchase Order(s).").format(row.idx, row.vehicle or _("(blank)")),
+				title=_("Pickup Vehicle Missing"),
+			)
+		yield frappe._dict(warehouse=info["warehouse"], purchase_order=info["purchase_order"])
+
+
 def link_shortfall_receipt_to_trip(doc, method=None):
 	"""A third path onto Direct-from-Supplier, alongside `receive_onto_vehicle`
 	and `make_purchase_order` above: dispatch buys the shortfall into the
@@ -1126,7 +1289,30 @@ def pending_pickup_qty(purchase_order):
 
 
 @frappe.whitelist()
-def create_trip_after_pickup(purchase_receipt):
+def pending_second_leg_trips(purchase_receipt):
+	"""Every pickup trip THIS receipt settled that has reached "Trip Reached
+	and Loaded" but has no follow-on (delivery-leg) trip yet — one receipt
+	can cover several trucks at once (see Pickup Vehicles), so this is a
+	list, not a single trip the way `Purchase Receipt.custom_delivery_trip`
+	(one Link) can only ever point at one of them."""
+	from thameen_erp.overrides.delivery_trip import PICKUP_ROUTE
+
+	rows = frappe.get_all(
+		"Delivery Trip",
+		filters={
+			"custom_purchase_receipt": purchase_receipt,
+			"custom_trip_route": PICKUP_ROUTE,
+			"status": "Trip Reached and Loaded",
+			"custom_follow_on_trip": ("in", ("", None)),
+			"docstatus": 1,
+		},
+		fields=["name", "vehicle", "driver"],
+	)
+	return rows
+
+
+@frappe.whitelist()
+def create_trip_after_pickup(purchase_receipt, pickup_trip=None):
 	"""The second leg. The truck is already loaded — this receipt is what
 	just put its Purchase Order's goods onto it — so nothing here is asked
 	for by hand: vehicle, driver and item rows all come straight off what
@@ -1134,19 +1320,33 @@ def create_trip_after_pickup(purchase_receipt):
 	Decide After Loading, same as any other trip collected at a supplier's
 	plant with nowhere fixed to go yet — the existing Deliver to Customer /
 	Deliver to Own Warehouse buttons apply unchanged from here.
+
+	`pickup_trip` names WHICH pickup trip this receipt covers — required
+	once a receipt can settle several at once (see Pickup Vehicles); left
+	blank, this falls back to the receipt's own `custom_delivery_trip`
+	(whichever trip that single Link happens to point at) for any older
+	caller that still only ever deals with one.
 	"""
 	frappe.has_permission("Delivery Trip", "create", throw=True)
 
 	from thameen_erp.overrides.delivery_trip import PICKUP_ROUTE
 
 	pr = frappe.get_doc("Purchase Receipt", purchase_receipt)
-	pickup_name = pr.get("custom_delivery_trip")
+	pickup_name = pickup_trip or pr.get("custom_delivery_trip")
 	if not pickup_name:
 		frappe.throw(_("This receipt is not linked to a pickup trip."))
 
 	pickup = frappe.get_doc("Delivery Trip", pickup_name)
 	if pickup.custom_trip_route != PICKUP_ROUTE:
 		frappe.throw(_("{0} is not a pickup trip.").format(pickup_name))
+	if pickup.custom_purchase_receipt != pr.name:
+		frappe.throw(_("{0} was not settled by this receipt.").format(pickup_name))
+	if pickup.custom_follow_on_trip:
+		frappe.throw(
+			_("{0} already has a follow-on trip: {1}.").format(
+				pickup_name, get_link_to_form("Delivery Trip", pickup.custom_follow_on_trip)
+			)
+		)
 
 	from thameen_erp.overrides.vehicle_stock import get_truck_stock_summary
 
@@ -1181,6 +1381,7 @@ def create_trip_after_pickup(purchase_receipt):
 		)
 
 	trip.insert()
+	frappe.db.set_value("Delivery Trip", pickup_name, "custom_follow_on_trip", trip.name, update_modified=False)
 
 	frappe.msgprint(
 		_("{0} created, already loaded on {1}. Choose Deliver to Customer or Deliver to Own "

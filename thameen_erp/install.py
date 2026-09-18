@@ -63,6 +63,7 @@ DELIVERY_TRIP_FIELD_ORDER = [
 	"naming_series", "company", "column_break_2", "email_notification_sent",
 	"custom_trip_section", "custom_trip_route", "custom_sales_order", "custom_delivery_location",
 	"custom_trip_col_break", "custom_supplier", "custom_purchase_order", "custom_purchase_receipt",
+	"custom_follow_on_trip",
 	"custom_target_warehouse",
 	"section_break_3", "vehicle", "custom_vehicle_warehouse",
 	"driver", "driver_name", "driver_email", "driver_address",
@@ -660,6 +661,17 @@ def get_custom_fields() -> dict:
 				"depends_on": "custom_purchase_receipt",
 				"insert_after": "custom_purchase_order",
 			},
+			{
+				"fieldname": "custom_follow_on_trip",
+				"label": "Follow-on Trip",
+				"fieldtype": "Link",
+				"options": "Delivery Trip",
+				"read_only": 1,
+				"allow_on_submit": 1,
+				"no_copy": 1,
+				"description": "Pickup trips only: the second, delivery-leg trip created off this one once it reached \"Trip Reached and Loaded\". Set once, by create_trip_after_pickup — stops a second one being raised for the same truck's load by mistake.",
+				"insert_after": "custom_purchase_receipt",
+			},
 			# Actual clock times, stamped by the status buttons and correctable
 			# afterwards. `departure_time` stays the PLANNED time; these two are
 			# what really happened, which is what the list view and the trip
@@ -1084,6 +1096,21 @@ def get_custom_fields() -> dict:
 				"read_only": 1,
 				"insert_after": "custom_delivery_trip",
 			},
+			{
+				"fieldname": "custom_pickup_vehicles_section",
+				"label": "Pickup Vehicles",
+				"fieldtype": "Section Break",
+				"insert_after": "custom_vehicle",
+				"collapsible": 1,
+				"description": "Only for a receipt settling one or more pickup trips (Purchase Order → \"Send Vehicle to Collect\"). Add every vehicle/trip this receipt covers — each item row against that trip's Purchase Order must then use that exact Warehouse, checked before this receipt can be submitted.",
+			},
+			{
+				"fieldname": "custom_pickup_vehicles",
+				"label": "Pickup Vehicles",
+				"fieldtype": "Table",
+				"options": "Purchase Receipt Pickup Vehicle",
+				"insert_after": "custom_pickup_vehicles_section",
+			},
 		],
 		"Material Request": [
 			{
@@ -1332,6 +1359,7 @@ def _apply_property_setters():
 		*[
 			("Delivery Trip", fieldname, "hidden", "1", "Check")
 			for fieldname in (
+				"custom_follow_on_trip",
 				"custom_loading_warehouse",
 				"custom_trip_type",
 				"custom_supply_source",

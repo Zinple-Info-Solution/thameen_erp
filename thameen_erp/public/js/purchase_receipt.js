@@ -7,11 +7,22 @@
 // Purchase Receipt.
 
 frappe.ui.form.on("Purchase Receipt", {
+	setup(frm) {
+		// Only a vehicle with an open pickup trip against one of THIS
+		// receipt's own Purchase Orders is offered — picking any other truck
+		// is not even possible, so there is nothing left to validate by hand.
+		frm.set_query("vehicle", "custom_pickup_vehicles", () => ({
+			query: "thameen_erp.overrides.procurement.pickup_vehicle_query",
+			filters: { purchase_orders: JSON.stringify(receipt_po_names(frm)) },
+		}));
+	},
+
 	refresh(frm) {
 		if (frm.doc.custom_delivery_trip) {
 			frm.add_custom_button(frm.doc.custom_delivery_trip,
 				() => frappe.set_route("Form", "Delivery Trip", frm.doc.custom_delivery_trip), __("View"));
 		}
+		if (frm.doc.docstatus === 0) add_add_pickup_vehicles_button(frm);
 		if (frm.doc.docstatus !== 1) return;
 
 		hide_other_receipt_create_buttons(frm);
@@ -33,72 +44,134 @@ frappe.ui.form.on("Purchase Receipt", {
 	},
 });
 
-// This receipt just landed a pickup trip's Purchase Order straight onto its
-// truck — the trip's own status is already "Trip Reached and Loaded" by the
-// time this form loads (see procurement.link_shortfall_receipt_to_trip,
-// which sets that in the same submit this receipt just went through).
-// Nothing here is asked for by hand: vehicle, driver and items all come
-// straight off the truck server-side.
-function add_create_trip_after_pickup_button(frm) {
-	if (!frm.doc.custom_delivery_trip) return;
-
-	frappe.db
-		.get_value("Delivery Trip", frm.doc.custom_delivery_trip, ["custom_trip_route", "status"])
-		.then(({ message }) => {
-			if (!message || message.custom_trip_route !== "Warehouse to Supplier") return;
-			if (message.status !== "Trip Reached and Loaded") return;
-
-			frm.add_custom_button(__("Create Delivery Trip"), () => open_trip_after_pickup_dialog(frm))
-				.addClass("btn-primary");
-		});
+function receipt_po_names(frm) {
+	return Array.from(new Set((frm.doc.items || []).map((r) => r.purchase_order).filter(Boolean)));
 }
 
-function open_trip_after_pickup_dialog(frm) {
-	frappe.db.get_value("Delivery Trip", frm.doc.custom_delivery_trip, "vehicle").then(({ message }) => {
-		const vehicle = message && message.vehicle;
+// One receipt can settle several trucks at once — the Pickup Vehicles table
+// says which. Filling it by hand means knowing which vehicles are even out
+// on a pickup trip for this PO; this does that lookup once and adds
+// whichever ones are not already in the table, same idea as
+// `add_waiting_trip_button` below but for the newer multi-vehicle case.
+function add_add_pickup_vehicles_button(frm) {
+	const po_names = receipt_po_names(frm);
+	if (!po_names.length) return;
+
+	frm.add_custom_button(__("Add Pickup Vehicles"), () => {
 		frappe.call({
-			method: "thameen_erp.overrides.vehicle_stock.get_truck_stock_summary",
-			args: { vehicle },
+			method: "thameen_erp.overrides.procurement.pickup_vehicles_for_pos",
+			args: { purchase_orders: JSON.stringify(po_names) },
 			freeze: true,
-			callback({ message: truck }) {
-				const rows = ((truck && truck.items) || [])
-					.map(
-						(i) => `<tr>
-							<td>${frappe.utils.escape_html(i.item_code)}</td>
-							<td class="text-right">${format_number(i.qty)}</td>
-							<td>${frappe.utils.escape_html(i.stock_uom || "")}</td>
-						</tr>`
-					)
-					.join("");
-
-				const html = `
-					<p>${__("{0} is already loaded — nothing here is edited, this just creates the trip.", [
-						frappe.utils.escape_html(vehicle || __("The vehicle")),
-					])}</p>
-					<table class="table table-bordered small">
-						<thead><tr><th>${__("Item")}</th><th class="text-right">${__("On truck")}</th><th>${__("UOM")}</th></tr></thead>
-						<tbody>${rows}</tbody>
-					</table>`;
-
-				const dialog = new frappe.ui.Dialog({
-					title: __("Create Delivery Trip"),
-					fields: [{ fieldtype: "HTML", options: html }],
-					primary_action_label: __("Create Trip"),
-					primary_action() {
-						frappe.call({
-							method: "thameen_erp.overrides.procurement.create_trip_after_pickup",
-							args: { purchase_receipt: frm.doc.name },
-							freeze: true,
-							callback({ message: trip }) {
-								dialog.hide();
-								if (trip) frappe.set_route("Form", "Delivery Trip", trip);
-							},
-						});
-					},
+			callback({ message: candidates }) {
+				if (!candidates || !candidates.length) {
+					frappe.msgprint(__("No vehicle has an open pickup trip against this receipt's Purchase Order(s)."));
+					return;
+				}
+				const already = new Set((frm.doc.custom_pickup_vehicles || []).map((r) => r.vehicle));
+				let added = 0;
+				candidates
+					.filter((c) => !already.has(c.vehicle))
+					.forEach((c) => {
+						const row = frm.add_child("custom_pickup_vehicles");
+						Object.assign(row, c);
+						added += 1;
+					});
+				frm.refresh_field("custom_pickup_vehicles");
+				frappe.show_alert({
+					message: added ? __("{0} vehicle(s) added.", [added]) : __("Already listed."),
+					indicator: added ? "green" : "orange",
 				});
-				dialog.show();
 			},
 		});
+	});
+}
+
+frappe.ui.form.on("Purchase Receipt Pickup Vehicle", {
+	vehicle(frm, cdt, cdn) {
+		const row = locals[cdt][cdn];
+		if (!row.vehicle) {
+			frappe.model.set_value(cdt, cdn, "delivery_trip", null);
+			frappe.model.set_value(cdt, cdn, "driver", null);
+			frappe.model.set_value(cdt, cdn, "warehouse", null);
+			return;
+		}
+		frappe.call({
+			method: "thameen_erp.overrides.procurement.pickup_trip_for_vehicle",
+			args: { vehicle: row.vehicle, purchase_orders: JSON.stringify(receipt_po_names(frm)) },
+			callback({ message: info }) {
+				frappe.model.set_value(cdt, cdn, "delivery_trip", info ? info.trip : null);
+				frappe.model.set_value(cdt, cdn, "driver", info ? info.driver : null);
+				frappe.model.set_value(cdt, cdn, "warehouse", info ? info.warehouse : null);
+			},
+		});
+	},
+});
+
+// This receipt may have landed one or several pickup trips' Purchase
+// Order(s) straight onto their trucks at once (see the Pickup Vehicles
+// table) — each one that reached "Trip Reached and Loaded" and has not
+// already got its follow-on trip gets its own button here. Nothing is
+// asked for by hand: vehicle, driver and items all come straight off that
+// truck server-side.
+function add_create_trip_after_pickup_button(frm) {
+	frappe.call({
+		method: "thameen_erp.overrides.procurement.pending_second_leg_trips",
+		args: { purchase_receipt: frm.doc.name },
+		callback({ message: pending }) {
+			if (!pending || !pending.length) return;
+
+			pending.forEach((row) => {
+				const label = pending.length > 1 ? __("Create Delivery Trip — {0}", [row.vehicle]) : __("Create Delivery Trip");
+				frm.add_custom_button(label, () => open_trip_after_pickup_dialog(frm, row.name, row.vehicle))
+					.addClass("btn-primary");
+			});
+		},
+	});
+}
+
+function open_trip_after_pickup_dialog(frm, pickup_trip, vehicle) {
+	frappe.call({
+		method: "thameen_erp.overrides.vehicle_stock.get_truck_stock_summary",
+		args: { vehicle },
+		freeze: true,
+		callback({ message: truck }) {
+			const rows = ((truck && truck.items) || [])
+				.map(
+					(i) => `<tr>
+						<td>${frappe.utils.escape_html(i.item_code)}</td>
+						<td class="text-right">${format_number(i.qty)}</td>
+						<td>${frappe.utils.escape_html(i.stock_uom || "")}</td>
+					</tr>`
+				)
+				.join("");
+
+			const html = `
+				<p>${__("{0} is already loaded — nothing here is edited, this just creates the trip.", [
+					frappe.utils.escape_html(vehicle || __("The vehicle")),
+				])}</p>
+				<table class="table table-bordered small">
+					<thead><tr><th>${__("Item")}</th><th class="text-right">${__("On truck")}</th><th>${__("UOM")}</th></tr></thead>
+					<tbody>${rows}</tbody>
+				</table>`;
+
+			const dialog = new frappe.ui.Dialog({
+				title: __("Create Delivery Trip — {0}", [vehicle]),
+				fields: [{ fieldtype: "HTML", options: html }],
+				primary_action_label: __("Create Trip"),
+				primary_action() {
+					frappe.call({
+						method: "thameen_erp.overrides.procurement.create_trip_after_pickup",
+						args: { purchase_receipt: frm.doc.name, pickup_trip },
+						freeze: true,
+						callback({ message: trip }) {
+							dialog.hide();
+							if (trip) frappe.set_route("Form", "Delivery Trip", trip);
+						},
+					});
+				},
+			});
+			dialog.show();
+		},
 	});
 }
 
