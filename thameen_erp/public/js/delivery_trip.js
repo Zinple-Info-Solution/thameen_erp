@@ -222,6 +222,13 @@ frappe.ui.form.on("Delivery Trip", {
 		if (!(frm.doc.custom_trip_items || []).length) return;
 		if (!frm.doc.vehicle) return;
 
+		// A pickup trip's rows describe what it is going TO the supplier to
+		// collect — nothing is on the truck yet, by design, so there is no
+		// stock to check (the server exempts it the same way). Capacity is
+		// still checked above: "planned 40, this truck only takes 20" is a
+		// real problem, and still gets the Split Trip offer.
+		const is_pickup = frm.doc.custom_trip_route === PICKUP_ROUTE;
+
 		return new Promise((resolve) => {
 			frappe.call({
 				method: "thameen_erp.overrides.vehicle_load.get_vehicle_load",
@@ -234,9 +241,13 @@ frappe.ui.form.on("Delivery Trip", {
 						offer_capacity_split(frm, load, resolve);
 						return;
 					}
+					if (is_pickup) {
+						resolve();
+						return;
+					}
 					check_stock_before_submit(frm, resolve);
 				},
-				error: () => check_stock_before_submit(frm, resolve),
+				error: () => (is_pickup ? resolve() : check_stock_before_submit(frm, resolve)),
 			});
 		});
 	},

@@ -600,126 +600,152 @@ def link_shortfall_receipt_to_trip(doc, method=None):
 
 	# The vehicle a row lands on picks the trip directly, not
 	# `Purchase Order.custom_delivery_trip` — that field is one Link, no
-	# good once a PO is split across several pickup trips (one per truck),
-	# where each truck's own receipt must find ITS OWN trip, not whichever
-	# one the PO happens to point at. A vehicle can only ever be on one
-	# open trip at a time (see `vehicles_booked_on_other_trips`), so this
-	# resolves correctly no matter how many sibling trips share the PO.
-	vehicle_warehouse = vehicle_rows[0].warehouse
-	if any(row.warehouse != vehicle_warehouse for row in vehicle_rows):
-		frappe.msgprint(
-			_("This receipt's vehicle-warehouse rows land on more than one truck, so no Delivery "
-			  "Trip could be linked automatically. Link it by hand on the trip if one applies."),
-			indicator="orange",
-			title=_("Not Linked"),
-		)
-		return
+	# good once a PO is split across several pickup trips (one per truck).
+	# One receipt can legitimately cover several of those trucks at once —
+	# dispatch does not want to raise a separate Purchase Receipt per
+	# vehicle just because the goods happened to load onto more than one —
+	# so this groups the receipt's own rows by warehouse and resolves (and
+	# advances) each truck's trip independently. A vehicle can only ever be
+	# on one open trip at a time (see `vehicles_booked_on_other_trips`), so
+	# each group resolves correctly no matter how many sibling trips share
+	# the PO.
+	rows_by_warehouse = {}
+	for row in vehicle_rows:
+		rows_by_warehouse.setdefault(row.warehouse, []).append(row)
 
-	vehicle_name = frappe.db.get_value("Vehicle", {"custom_vehicle_warehouse": vehicle_warehouse}, "name")
-	if not vehicle_name:
-		return
-
-	trip_name = frappe.db.get_value(
-		"Delivery Trip",
-		{"vehicle": vehicle_name, "custom_purchase_order": po_name, "docstatus": 1},
-		"name",
-		order_by="creation desc",
-	)
-	if not trip_name:
-		return
-
-	trip = frappe.get_doc("Delivery Trip", trip_name)
-
-	# A pickup trip (empty truck sent to collect this PO) is not a shortfall
-	# being redirected — it is exactly what it always was, just now loaded.
-	# None of the Direct-from-Supplier flipping below applies: route, supply
-	# source and destination all stay Warehouse to Supplier. Its own status
-	# machine (see PICKUP_ROUTE) takes it from here — "Trip Reached and
-	# Loaded" is the one status this whole app sets automatically rather
-	# than from a button, precisely because this is the moment it becomes
-	# true.
 	from thameen_erp.overrides.delivery_trip import PICKUP_ROUTE
 
-	if trip.custom_trip_route == PICKUP_ROUTE:
-		if trip.docstatus == 1 and trip.status == "Trip Started":
-			frappe.db.set_value(
-				"Delivery Trip", trip_name,
-				{"custom_purchase_receipt": doc.name, "status": "Trip Reached and Loaded"},
-				update_modified=False,
-			)
-		return
+	linked_pickup_trips = []
+	last_linked_trip = None
 
-	# Already Direct-from-Supplier — this receipt is the one `load_vehicle` /
-	# `receive_onto_vehicle` itself just raised and submitted for that trip,
-	# not a new shortfall being redirected. Nothing left to flip; let that
-	# function's own message stand alone instead of printing a second one.
-	if trip.custom_supply_source == DIRECT:
-		return
+	for vehicle_warehouse, rows in rows_by_warehouse.items():
+		vehicle_name = frappe.db.get_value("Vehicle", {"custom_vehicle_warehouse": vehicle_warehouse}, "name")
+		if not vehicle_name:
+			continue
 
-	if trip.custom_purchase_receipt and trip.custom_purchase_receipt != doc.name:
-		frappe.msgprint(
-			_("{0} is already linked to Purchase Receipt {1}. {2} was not linked over it — check "
-			  "both receipts cover this trip correctly.").format(
-				get_link_to_form("Delivery Trip", trip_name), trip.custom_purchase_receipt, doc.name
-			),
-			indicator="orange",
-			title=_("Already Linked"),
+		trip_name = frappe.db.get_value(
+			"Delivery Trip",
+			{"vehicle": vehicle_name, "custom_purchase_order": po_name, "docstatus": 1},
+			"name",
+			order_by="creation desc",
 		)
-		return
+		if not trip_name:
+			continue
 
-	# Set here, not left for the trip's own `_fill_supplier_from_po_or_receipt`
-	# to catch on its next save: that only runs inside validate(), and this
-	# write bypasses it entirely, same as every other field set above. Left
-	# to validate(), the Supplier field would sit blank — and any dialog that
-	# offers to raise a second Purchase Order for a further shortfall would
-	# have nothing to default it to — until someone happens to save the trip.
-	trip_updates = {
-		"custom_purchase_receipt": doc.name,
-		"custom_supply_source": DIRECT,
-		"custom_destination_type": "Customer",
-		"custom_trip_route": "Supplier to Customer",
-	}
-	# `_validate_supply_source` refuses to submit a Direct-from-Supplier trip
-	# with no `custom_purchase_order` — "the PO IS its stock" — and this is
-	# the one place that flips a trip to that supply source without ever
-	# having called `make_purchase_order` (which is what normally sets it).
-	# Without this, the trip has a real PO and its receipt already in hand,
-	# and still gets told it needs one.
-	if not trip.custom_purchase_order:
-		trip_updates["custom_purchase_order"] = po_name
-	if not trip.custom_supplier:
-		trip_updates["custom_supplier"] = po_supplier
-	if not trip.custom_supplier_warehouse:
-		supplier_warehouse = frappe.db.get_value("Supplier", po_supplier, "custom_default_warehouse")
-		if supplier_warehouse:
-			trip_updates["custom_supplier_warehouse"] = supplier_warehouse
+		trip = frappe.get_doc("Delivery Trip", trip_name)
 
-	frappe.db.set_value("Delivery Trip", trip_name, trip_updates, update_modified=False)
-	frappe.db.set_value("Purchase Receipt", doc.name, "custom_delivery_trip", trip_name, update_modified=False)
+		# A pickup trip (empty truck sent to collect this PO) is not a
+		# shortfall being redirected — it is exactly what it always was,
+		# just now loaded. None of the Direct-from-Supplier flipping below
+		# applies: route, supply source and destination all stay Warehouse
+		# to Supplier. Its own status machine (see PICKUP_ROUTE) takes it
+		# from here — "Trip Reached and Loaded" is the one status this
+		# whole app sets automatically rather than from a button, precisely
+		# because this is the moment it becomes true.
+		if trip.custom_trip_route == PICKUP_ROUTE:
+			if trip.docstatus == 1 and trip.status == "Trip Started":
+				frappe.db.set_value(
+					"Delivery Trip", trip_name,
+					{"custom_purchase_receipt": doc.name, "status": "Trip Reached and Loaded"},
+					update_modified=False,
+				)
+			linked_pickup_trips.append(trip_name)
+			last_linked_trip = trip_name
+			continue
 
-	# This path skips `_validate_po_pending_qty` (no `po_detail` to check) and,
-	# once the trip is Direct-from-Supplier, `_validate_stock_available` too
-	# (that check exempts this supply source outright) — so nothing else will
-	# ever tell the dispatcher if this receipt came up short. A plain qty
-	# comparison, by item, is the only guard left standing.
-	received = {}
-	for row in vehicle_rows:
-		received[row.item_code] = flt(received.get(row.item_code)) + flt(row.qty) * (flt(row.conversion_factor) or 1)
+		# Already Direct-from-Supplier — this receipt is the one
+		# `load_vehicle` / `receive_onto_vehicle` itself just raised and
+		# submitted for that trip, not a new shortfall being redirected.
+		# Nothing left to flip; let that function's own message stand alone
+		# instead of printing a second one.
+		if trip.custom_supply_source == DIRECT:
+			continue
 
-	short = []
-	for row in trip.get("custom_trip_items") or []:
-		needed = flt(row.qty) * (flt(row.conversion_factor) or 1)
-		have = flt(received.get(row.item_code))
-		if needed > have + QTY_TOLERANCE:
-			short.append(_("{0}: trip needs {1}, this receipt brought {2}").format(row.item_code, needed, have))
+		if trip.custom_purchase_receipt and trip.custom_purchase_receipt != doc.name:
+			frappe.msgprint(
+				_("{0} is already linked to Purchase Receipt {1}. {2} was not linked over it — check "
+				  "both receipts cover this trip correctly.").format(
+					get_link_to_form("Delivery Trip", trip_name), trip.custom_purchase_receipt, doc.name
+				),
+				indicator="orange",
+				title=_("Already Linked"),
+			)
+			continue
 
-	message = _("Stock updated on {0}. Linked to {1} — Trip Route set to Supplier to Customer.").format(
-		vehicle_warehouse, get_link_to_form("Delivery Trip", trip_name)
-	)
-	if short:
-		message += "<br><br>" + _("This receipt does not cover the whole trip:") + "<br>" + "<br>".join(short)
+		# Set here, not left for the trip's own `_fill_supplier_from_po_or_receipt`
+		# to catch on its next save: that only runs inside validate(), and this
+		# write bypasses it entirely, same as every other field set above. Left
+		# to validate(), the Supplier field would sit blank — and any dialog that
+		# offers to raise a second Purchase Order for a further shortfall would
+		# have nothing to default it to — until someone happens to save the trip.
+		trip_updates = {
+			"custom_purchase_receipt": doc.name,
+			"custom_supply_source": DIRECT,
+			"custom_destination_type": "Customer",
+			"custom_trip_route": "Supplier to Customer",
+		}
+		# `_validate_supply_source` refuses to submit a Direct-from-Supplier trip
+		# with no `custom_purchase_order` — "the PO IS its stock" — and this is
+		# the one place that flips a trip to that supply source without ever
+		# having called `make_purchase_order` (which is what normally sets it).
+		# Without this, the trip has a real PO and its receipt already in hand,
+		# and still gets told it needs one.
+		if not trip.custom_purchase_order:
+			trip_updates["custom_purchase_order"] = po_name
+		if not trip.custom_supplier:
+			trip_updates["custom_supplier"] = po_supplier
+		if not trip.custom_supplier_warehouse:
+			supplier_warehouse = frappe.db.get_value("Supplier", po_supplier, "custom_default_warehouse")
+			if supplier_warehouse:
+				trip_updates["custom_supplier_warehouse"] = supplier_warehouse
 
-	frappe.msgprint(message, indicator="orange" if short else "green", title=_("Stock Updated"))
+		frappe.db.set_value("Delivery Trip", trip_name, trip_updates, update_modified=False)
+		last_linked_trip = trip_name
+
+		# This path skips `_validate_po_pending_qty` (no `po_detail` to check) and,
+		# once the trip is Direct-from-Supplier, `_validate_stock_available` too
+		# (that check exempts this supply source outright) — so nothing else will
+		# ever tell the dispatcher if this receipt came up short. A plain qty
+		# comparison, by item, is the only guard left standing. Scoped to THIS
+		# warehouse's own rows only — another truck's cement in the same
+		# receipt is not this trip's stock.
+		received = {}
+		for row in rows:
+			received[row.item_code] = flt(received.get(row.item_code)) + flt(row.qty) * (flt(row.conversion_factor) or 1)
+
+		short = []
+		for row in trip.get("custom_trip_items") or []:
+			needed = flt(row.qty) * (flt(row.conversion_factor) or 1)
+			have = flt(received.get(row.item_code))
+			if needed > have + QTY_TOLERANCE:
+				short.append(_("{0}: trip needs {1}, this receipt brought {2}").format(row.item_code, needed, have))
+
+		message = _("Stock updated on {0}. Linked to {1} — Trip Route set to Supplier to Customer.").format(
+			vehicle_warehouse, get_link_to_form("Delivery Trip", trip_name)
+		)
+		if short:
+			message += "<br><br>" + _("This receipt does not cover the whole trip:") + "<br>" + "<br>".join(short)
+
+		frappe.msgprint(message, indicator="orange" if short else "green", title=_("Stock Updated"))
+
+	# The PO→PR doc-mapping copies `custom_delivery_trip` straight off the
+	# Purchase Order — fine while a PO has one trip, wrong the moment it has
+	# several. Overwrite it with whichever trip this receipt actually
+	# resolved to last, purely so the receipt's own "View" button and status
+	# checks have somewhere correct to point — same "informational only"
+	# convention `create_pickup_trips` already uses on the PO itself.
+	if last_linked_trip:
+		frappe.db.set_value("Purchase Receipt", doc.name, "custom_delivery_trip", last_linked_trip, update_modified=False)
+
+	if len(linked_pickup_trips) > 1:
+		frappe.msgprint(
+			_("This receipt loaded {0} trucks at once: {1}.").format(
+				len(linked_pickup_trips),
+				", ".join(get_link_to_form("Delivery Trip", t) for t in linked_pickup_trips),
+			),
+			indicator="green",
+			alert=True,
+		)
 
 
 def purchase_receipt_on_cancel(doc, method=None):
