@@ -1102,7 +1102,6 @@ def get_custom_fields() -> dict:
 				"fieldtype": "Section Break",
 				"insert_after": "custom_vehicle",
 				"collapsible": 1,
-				"description": "Only for a receipt settling one or more pickup trips (Purchase Order → \"Send Vehicle to Collect\"). Add every vehicle/trip this receipt covers — each item row against that trip's Purchase Order must then use that exact Warehouse, checked before this receipt can be submitted.",
 			},
 			{
 				"fieldname": "custom_pickup_vehicles",
@@ -1156,6 +1155,7 @@ def install_customisations():
 	_apply_property_setters()
 	_apply_item_grid_columns()
 	_unrequire_stray_custom_fields()
+	_clear_stray_custom_field_descriptions()
 	frappe.clear_cache()
 
 
@@ -1263,6 +1263,17 @@ def _unrequire_stray_custom_fields():
 		frappe.db.set_value("Custom Field", name, "reqd", 0, update_modified=False)
 	if stray:
 		frappe.clear_cache(doctype="Delivery Trip")
+
+
+def _clear_stray_custom_field_descriptions():
+	"""`create_custom_fields(update=True)` only ever sets properties present
+	in the dict it is given — dropping "description" from a field's
+	definition here does not clear an already-installed one, it just stops
+	writing it again. Blank it by hand, once, for whichever fields this app
+	no longer wants a description on."""
+	for name in ("Purchase Receipt-custom_pickup_vehicles_section",):
+		if frappe.db.exists("Custom Field", name):
+			frappe.db.set_value("Custom Field", name, "description", "", update_modified=False)
 
 
 def _apply_property_setters():

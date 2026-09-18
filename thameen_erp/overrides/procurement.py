@@ -572,17 +572,51 @@ def _open_pickup_trips_for_pos(po_names):
 	}
 
 
+def _trip_claims(trip_names):
+	"""{trip_name: [{po_detail, qty}]} — each trip's own item rows, in stock
+	qty, grouped by the PO line they were cut from. A single PO line split
+	across several vehicles gives every one of those trips the SAME
+	po_detail — qty is what actually tells them apart, so both travel
+	together wherever this is used to find the matching receipt row."""
+	if not trip_names:
+		return {}
+	rows = frappe.get_all(
+		"Delivery Trip Item",
+		filters={"parent": ("in", trip_names), "po_detail": ("is", "set")},
+		fields=["parent", "po_detail", "qty", "conversion_factor"],
+	)
+	out = {}
+	for row in rows:
+		out.setdefault(row.parent, []).append(
+			{"po_detail": row.po_detail, "qty": flt(row.qty) * (flt(row.conversion_factor) or 1)}
+		)
+	return out
+
+
 @frappe.whitelist()
 def pickup_vehicles_for_pos(purchase_orders):
 	"""Every vehicle with an open pickup trip against these Purchase Orders —
 	for the Purchase Receipt's own "Add Pickup Vehicles" button, so filling in
 	its Pickup Vehicles table is one click instead of hunting down which
-	trucks are out for which PO."""
+	trucks are out for which PO. `claims` per candidate, same reason as in
+	`pickup_trip_for_vehicle`: matching item rows to the right vehicle's
+	warehouse by `po_detail` ALONE cannot tell two vehicles apart when they
+	split the very same PO line — qty is what does."""
 	if isinstance(purchase_orders, str):
 		purchase_orders = json.loads(purchase_orders or "[]")
 	found = _open_pickup_trips_for_pos(purchase_orders)
+	if not found:
+		return []
+
+	claims_by_trip = _trip_claims([info["trip"] for info in found.values()])
 	return [
-		{"vehicle": vehicle, "delivery_trip": info["trip"], "driver": info["driver"], "warehouse": info["warehouse"]}
+		{
+			"vehicle": vehicle,
+			"delivery_trip": info["trip"],
+			"driver": info["driver"],
+			"warehouse": info["warehouse"],
+			"claims": claims_by_trip.get(info["trip"], []),
+		}
 		for vehicle, info in found.items()
 	]
 
@@ -614,11 +648,24 @@ def pickup_vehicle_query(doctype, txt, searchfield, start, page_len, filters):
 def pickup_trip_for_vehicle(vehicle, purchase_orders):
 	"""The open pickup trip (and its warehouse) this vehicle is actually out
 	on, scoped to this receipt's own Purchase Order(s) — what a Purchase
-	Receipt Pickup Vehicle row auto-fills the moment its Vehicle is picked."""
+	Receipt Pickup Vehicle row auto-fills the moment its Vehicle is picked.
+
+	`claims` — this trip's own item rows as {po_detail, qty} — is what the
+	form uses to find which of the receipt's OWN item rows to auto-set to
+	this same warehouse. `po_detail` alone is not enough: a single PO line
+	split across two vehicles gives BOTH of their trips that same po_detail,
+	only their claimed qty actually differs, so both travel together.
+	"""
 	if isinstance(purchase_orders, str):
 		purchase_orders = json.loads(purchase_orders or "[]")
 	found = _open_pickup_trips_for_pos(purchase_orders)
-	return found.get(vehicle)
+	info = found.get(vehicle)
+	if not info:
+		return None
+
+	info = dict(info)
+	info["claims"] = _trip_claims([info["trip"]]).get(info["trip"], [])
+	return info
 
 
 def validate_pickup_receipt_warehouse(doc, method=None):

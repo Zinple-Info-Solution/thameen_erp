@@ -72,11 +72,14 @@ function add_add_pickup_vehicles_button(frm) {
 				candidates
 					.filter((c) => !already.has(c.vehicle))
 					.forEach((c) => {
+						const { claims, ...fields } = c;
 						const row = frm.add_child("custom_pickup_vehicles");
-						Object.assign(row, c);
+						Object.assign(row, fields);
+						apply_pickup_warehouse_to_items(frm, { warehouse: c.warehouse, claims });
 						added += 1;
 					});
 				frm.refresh_field("custom_pickup_vehicles");
+				frm.refresh_field("items");
 				frappe.show_alert({
 					message: added ? __("{0} vehicle(s) added.", [added]) : __("Already listed."),
 					indicator: added ? "green" : "orange",
@@ -102,10 +105,37 @@ frappe.ui.form.on("Purchase Receipt Pickup Vehicle", {
 				frappe.model.set_value(cdt, cdn, "delivery_trip", info ? info.trip : null);
 				frappe.model.set_value(cdt, cdn, "driver", info ? info.driver : null);
 				frappe.model.set_value(cdt, cdn, "warehouse", info ? info.warehouse : null);
+				if (info) apply_pickup_warehouse_to_items(frm, info);
 			},
 		});
 	},
 });
+
+const PICKUP_QTY_TOL = 0.01;
+
+// Picking the vehicle here is the whole point — no one should then have to
+// go set the same warehouse a second time, by hand, on every item row it
+// applies to. Matched by `po_detail` AND qty together, not `po_detail`
+// alone: a single PO line split across two trucks gives BOTH of their trips
+// the very same po_detail — only how much each one actually claimed tells
+// their rows apart. A row whose qty does not match any claim here is left
+// alone rather than guessed at.
+function apply_pickup_warehouse_to_items(frm, info) {
+	if (!info.warehouse || !info.claims || !info.claims.length) return;
+	let changed = false;
+	(frm.doc.items || []).forEach((item) => {
+		if (!item.purchase_order_item || item.warehouse === info.warehouse) return;
+		const item_qty = flt(item.qty) * (flt(item.conversion_factor) || 1);
+		const matches = info.claims.some(
+			(c) => c.po_detail === item.purchase_order_item && Math.abs(flt(c.qty) - item_qty) < PICKUP_QTY_TOL
+		);
+		if (matches) {
+			frappe.model.set_value(item.doctype, item.name, "warehouse", info.warehouse);
+			changed = true;
+		}
+	});
+	if (changed) frappe.show_alert({ message: __("Item row warehouse(s) updated to match {0}.", [info.warehouse]), indicator: "green" });
+}
 
 // This receipt may have landed one or several pickup trips' Purchase
 // Order(s) straight onto their trucks at once (see the Pickup Vehicles
