@@ -694,13 +694,16 @@ def validate_pickup_receipt_warehouse(doc, method=None):
 	warehouses named for ITS OWN Purchase Order, not just any of them.
 
 	Self-heals the one case that is never actually ambiguous: a PO with only
-	ONE truck listed for it. There is nothing to choose between, so a
-	mismatched row's warehouse is silently corrected here, on every save —
-	not just when the browser's own auto-fill happened to already run. That
-	auto-fill is still what makes multi-truck rows line up correctly the
-	first time (there the choice is real, and only the dispatcher's own
-	quantities can settle it), so this only ever fills the single-truck gap
-	it leaves behind.
+	ONE truck listed for it AND that truck can actually hold everything this
+	receipt is putting against this PO. There is nothing to choose between
+	there, so a mismatched row's warehouse is silently corrected on every
+	save — not just when the browser's own auto-fill happened to already
+	run. But "only one truck listed" is not by itself proof there is no
+	real problem: if the rows add up to more than that one truck's own
+	rated capacity, forcing them all onto it would create cement that
+	physically cannot be there — that is a missing second truck, not an
+	unambiguous single-truck receipt, so it is left for the mismatch error
+	below to explain instead of being silently forced.
 	"""
 	po_names = list({row.purchase_order for row in doc.items if row.get("purchase_order")})
 	if not po_names:
@@ -717,14 +720,52 @@ def validate_pickup_receipt_warehouse(doc, method=None):
 	for row in chosen_rows:
 		warehouses_by_po.setdefault(row.purchase_order, set()).add(row.warehouse)
 
+	capacity_by_warehouse = {}
+	if warehouses_by_po:
+		all_warehouses = {wh for whs in warehouses_by_po.values() for wh in whs}
+		for v in frappe.get_all(
+			"Vehicle",
+			filters={"custom_vehicle_warehouse": ("in", list(all_warehouses))},
+			fields=["custom_vehicle_warehouse as warehouse", "custom_capacity as capacity"],
+		):
+			capacity_by_warehouse[v.warehouse] = flt(v.capacity)
+
+	def _row_qty(row):
+		return flt(row.qty) * (flt(row.conversion_factor) or 1)
+
+	over_capacity = []
 	for row in doc.items:
 		if row.purchase_order not in pickup_pos:
 			continue
 		if chosen.get(row.warehouse) == row.purchase_order:
 			continue
 		candidates = warehouses_by_po.get(row.purchase_order) or set()
-		if len(candidates) == 1:
-			row.warehouse = next(iter(candidates))
+		if len(candidates) != 1:
+			continue
+
+		only_warehouse = next(iter(candidates))
+		capacity = capacity_by_warehouse.get(only_warehouse)
+		if capacity:
+			total_for_po = sum(
+				_row_qty(r)
+				for r in doc.items
+				if r.purchase_order == row.purchase_order
+				and (r.name == row.name or r.warehouse == only_warehouse)
+			)
+			if total_for_po > capacity + QTY_TOLERANCE:
+				over_capacity.append(
+					_("Row {0} ({1}): this Purchase Order needs {2} on {3}, but that truck is only rated "
+					  "for {4}. Add a second truck to Pickup Vehicles for this PO, or split the qty across "
+					  "the receipt rows to match each truck.").format(
+						row.idx, row.item_code, flt(total_for_po, 2), only_warehouse, flt(capacity, 2)
+					)
+				)
+				continue
+
+		row.warehouse = only_warehouse
+
+	if over_capacity and doc._action == "submit":
+		frappe.throw("<br>".join(over_capacity), title=_("Truck Over Capacity"))
 
 	if doc._action != "submit":
 		return
