@@ -72,10 +72,10 @@ function add_add_pickup_vehicles_button(frm) {
 				candidates
 					.filter((c) => !already.has(c.vehicle))
 					.forEach((c) => {
-						const { claims, ...fields } = c;
+						const { claims, purchase_order, ...fields } = c;
 						const row = frm.add_child("custom_pickup_vehicles");
 						Object.assign(row, fields);
-						apply_pickup_warehouse_to_items(frm, { warehouse: c.warehouse, claims });
+						apply_pickup_warehouse_to_items(frm, { warehouse: c.warehouse, claims, purchase_order });
 						added += 1;
 					});
 				frm.refresh_field("custom_pickup_vehicles");
@@ -115,20 +115,33 @@ const PICKUP_QTY_TOL = 0.01;
 
 // Picking the vehicle here is the whole point — no one should then have to
 // go set the same warehouse a second time, by hand, on every item row it
-// applies to. Matched by `po_detail` AND qty together, not `po_detail`
-// alone: a single PO line split across two trucks gives BOTH of their trips
-// the very same po_detail — only how much each one actually claimed tells
-// their rows apart. A row whose qty does not match any claim here is left
-// alone rather than guessed at.
+// applies to.
+//
+// Two ways a row is matched to a vehicle's claim, in order:
+//   1. `po_detail` + qty — precise, but only works for a row pulled in via
+//      "Get Items From Purchase Order" (or the receipt's own standard
+//      Create button off the PO), which is the only thing that ever stamps
+//      `purchase_order_item` onto a row in the first place.
+//   2. `purchase_order` + item code + qty — the fallback for a row typed in
+//      by hand, which never gets `purchase_order_item` set at all.
+// Either way, qty is what tells two vehicles apart when they split the very
+// same PO line (both trips carry the same po_detail / item code, only how
+// much each one actually claimed differs) — a row whose qty does not match
+// any claim is left alone rather than guessed at.
 function apply_pickup_warehouse_to_items(frm, info) {
 	if (!info.warehouse || !info.claims || !info.claims.length) return;
 	let changed = false;
 	(frm.doc.items || []).forEach((item) => {
-		if (!item.purchase_order_item || item.warehouse === info.warehouse) return;
+		if (item.warehouse === info.warehouse) return;
 		const item_qty = flt(item.qty) * (flt(item.conversion_factor) || 1);
-		const matches = info.claims.some(
-			(c) => c.po_detail === item.purchase_order_item && Math.abs(flt(c.qty) - item_qty) < PICKUP_QTY_TOL
-		);
+
+		const matches = item.purchase_order_item
+			? info.claims.some(
+					(c) => c.po_detail === item.purchase_order_item && Math.abs(flt(c.qty) - item_qty) < PICKUP_QTY_TOL
+			  )
+			: item.purchase_order === info.purchase_order &&
+			  info.claims.some((c) => c.item_code === item.item_code && Math.abs(flt(c.qty) - item_qty) < PICKUP_QTY_TOL);
+
 		if (matches) {
 			frappe.model.set_value(item.doctype, item.name, "warehouse", info.warehouse);
 			changed = true;
@@ -137,12 +150,49 @@ function apply_pickup_warehouse_to_items(frm, info) {
 	if (changed) frappe.show_alert({ message: __("Item row warehouse(s) updated to match {0}.", [info.warehouse]), indicator: "green" });
 }
 
-// This receipt may have landed one or several pickup trips' Purchase
-// Order(s) straight onto their trucks at once (see the Pickup Vehicles
-// table) — each one that reached "Trip Reached and Loaded" and has not
-// already got its follow-on trip gets its own button here. Nothing is
-// asked for by hand: vehicle, driver and items all come straight off that
-// truck server-side.
+// Re-runs the same matching for every vehicle already in the Pickup
+// Vehicles table — covers a row typed in (or edited) AFTER the vehicle was
+// already picked, when the one-shot `vehicle` handler above had nothing to
+// match against yet.
+function reapply_all_pickup_warehouses(frm) {
+	const rows = (frm.doc.custom_pickup_vehicles || []).filter((r) => r.vehicle);
+	if (!rows.length) return;
+
+	frappe.call({
+		method: "thameen_erp.overrides.procurement.pickup_vehicles_for_pos",
+		args: { purchase_orders: JSON.stringify(receipt_po_names(frm)) },
+		callback({ message: candidates }) {
+			const by_vehicle = {};
+			(candidates || []).forEach((c) => (by_vehicle[c.vehicle] = c));
+			rows.forEach((row) => {
+				const info = by_vehicle[row.vehicle];
+				if (info) apply_pickup_warehouse_to_items(frm, info);
+			});
+			frm.refresh_field("items");
+		},
+	});
+}
+
+frappe.ui.form.on("Purchase Receipt Item", {
+	item_code(frm) {
+		reapply_all_pickup_warehouses(frm);
+	},
+	qty(frm) {
+		reapply_all_pickup_warehouses(frm);
+	},
+	purchase_order(frm) {
+		reapply_all_pickup_warehouses(frm);
+	},
+});
+
+// The follow-on trip for a pickup that just reached "Trip Reached and
+// Loaded" is created automatically, server-side, the moment its receipt is
+// submitted (see procurement.link_shortfall_receipt_to_trip) — no dialog,
+// nothing to confirm, since vehicle/driver/items all come straight off the
+// truck with no choice involved. This button only ever appears as a
+// fallback, for the rare case that automatic creation failed (already
+// messaged on submit) and one of this receipt's pickup trips is still
+// waiting on its follow-on trip.
 function add_create_trip_after_pickup_button(frm) {
 	frappe.call({
 		method: "thameen_erp.overrides.procurement.pending_second_leg_trips",
@@ -152,55 +202,17 @@ function add_create_trip_after_pickup_button(frm) {
 
 			pending.forEach((row) => {
 				const label = pending.length > 1 ? __("Create Delivery Trip — {0}", [row.vehicle]) : __("Create Delivery Trip");
-				frm.add_custom_button(label, () => open_trip_after_pickup_dialog(frm, row.name, row.vehicle))
-					.addClass("btn-primary");
-			});
-		},
-	});
-}
-
-function open_trip_after_pickup_dialog(frm, pickup_trip, vehicle) {
-	frappe.call({
-		method: "thameen_erp.overrides.vehicle_stock.get_truck_stock_summary",
-		args: { vehicle },
-		freeze: true,
-		callback({ message: truck }) {
-			const rows = ((truck && truck.items) || [])
-				.map(
-					(i) => `<tr>
-						<td>${frappe.utils.escape_html(i.item_code)}</td>
-						<td class="text-right">${format_number(i.qty)}</td>
-						<td>${frappe.utils.escape_html(i.stock_uom || "")}</td>
-					</tr>`
-				)
-				.join("");
-
-			const html = `
-				<p>${__("{0} is already loaded — nothing here is edited, this just creates the trip.", [
-					frappe.utils.escape_html(vehicle || __("The vehicle")),
-				])}</p>
-				<table class="table table-bordered small">
-					<thead><tr><th>${__("Item")}</th><th class="text-right">${__("On truck")}</th><th>${__("UOM")}</th></tr></thead>
-					<tbody>${rows}</tbody>
-				</table>`;
-
-			const dialog = new frappe.ui.Dialog({
-				title: __("Create Delivery Trip — {0}", [vehicle]),
-				fields: [{ fieldtype: "HTML", options: html }],
-				primary_action_label: __("Create Trip"),
-				primary_action() {
+				frm.add_custom_button(label, () => {
 					frappe.call({
 						method: "thameen_erp.overrides.procurement.create_trip_after_pickup",
-						args: { purchase_receipt: frm.doc.name, pickup_trip },
+						args: { purchase_receipt: frm.doc.name, pickup_trip: row.name },
 						freeze: true,
 						callback({ message: trip }) {
-							dialog.hide();
-							if (trip) frappe.set_route("Form", "Delivery Trip", trip);
+							if (trip) frm.reload_doc();
 						},
 					});
-				},
+				}).addClass("btn-primary");
 			});
-			dialog.show();
 		},
 	});
 }

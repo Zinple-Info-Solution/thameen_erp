@@ -573,22 +573,33 @@ def _open_pickup_trips_for_pos(po_names):
 
 
 def _trip_claims(trip_names):
-	"""{trip_name: [{po_detail, qty}]} — each trip's own item rows, in stock
-	qty, grouped by the PO line they were cut from. A single PO line split
-	across several vehicles gives every one of those trips the SAME
-	po_detail — qty is what actually tells them apart, so both travel
-	together wherever this is used to find the matching receipt row."""
+	"""{trip_name: [{po_detail, item_code, qty}]} — each trip's own item
+	rows, in stock qty, grouped by the PO line they were cut from. A single
+	PO line split across several vehicles gives every one of those trips the
+	SAME po_detail — qty is what actually tells them apart, so both travel
+	together wherever this is used to find the matching receipt row.
+
+	`item_code` rides along too: a receipt row typed in by hand (not pulled
+	via "Get Items From Purchase Order") never gets `purchase_order_item`
+	set at all — ERPNext only stamps that during mapped-doc creation — so
+	matching such a row needs a fallback that does not depend on po_detail
+	existing on the row in the first place.
+	"""
 	if not trip_names:
 		return {}
 	rows = frappe.get_all(
 		"Delivery Trip Item",
 		filters={"parent": ("in", trip_names), "po_detail": ("is", "set")},
-		fields=["parent", "po_detail", "qty", "conversion_factor"],
+		fields=["parent", "po_detail", "item_code", "qty", "conversion_factor"],
 	)
 	out = {}
 	for row in rows:
 		out.setdefault(row.parent, []).append(
-			{"po_detail": row.po_detail, "qty": flt(row.qty) * (flt(row.conversion_factor) or 1)}
+			{
+				"po_detail": row.po_detail,
+				"item_code": row.item_code,
+				"qty": flt(row.qty) * (flt(row.conversion_factor) or 1),
+			}
 		)
 	return out
 
@@ -615,6 +626,7 @@ def pickup_vehicles_for_pos(purchase_orders):
 			"delivery_trip": info["trip"],
 			"driver": info["driver"],
 			"warehouse": info["warehouse"],
+			"purchase_order": info["purchase_order"],
 			"claims": claims_by_trip.get(info["trip"], []),
 		}
 		for vehicle, info in found.items()
@@ -859,6 +871,7 @@ def link_shortfall_receipt_to_trip(doc, method=None):
 					{"custom_purchase_receipt": doc.name, "status": "Trip Reached and Loaded"},
 					update_modified=False,
 				)
+				_auto_create_follow_on_trip(trip_name, doc.name)
 			linked_pickup_trips.append(trip_name)
 			last_linked_trip = trip_name
 			continue
@@ -1358,6 +1371,33 @@ def pending_second_leg_trips(purchase_receipt):
 	return rows
 
 
+def _auto_create_follow_on_trip(pickup_trip, purchase_receipt):
+	"""Called the instant a pickup trip reaches "Trip Reached and Loaded" —
+	nothing about the follow-on trip is a choice (vehicle, driver and items
+	all come straight off the truck this receipt just loaded), so there is
+	nothing to ask the dispatcher to confirm in a dialog first. Any failure
+	here (truck genuinely empty, already has one, ...) is swallowed and
+	logged rather than allowed to fail the receipt's own submit — the
+	"Create Delivery Trip" button on the receipt still covers it by hand as
+	a fallback.
+	"""
+	try:
+		create_trip_after_pickup(purchase_receipt, pickup_trip=pickup_trip)
+	except Exception:
+		frappe.log_error(
+			frappe.get_traceback(),
+			f"Thameen ERP: auto follow-on trip failed for pickup trip {pickup_trip}",
+		)
+		frappe.msgprint(
+			_("Could not automatically create the delivery trip for {0} — use the \"Create Delivery Trip\" "
+			  "button on this receipt once you have checked why.").format(
+				get_link_to_form("Delivery Trip", pickup_trip)
+			),
+			indicator="orange",
+			title=_("Follow-on Trip Not Created"),
+		)
+
+
 @frappe.whitelist()
 def create_trip_after_pickup(purchase_receipt, pickup_trip=None):
 	"""The second leg. The truck is already loaded — this receipt is what
@@ -1431,10 +1471,12 @@ def create_trip_after_pickup(purchase_receipt, pickup_trip=None):
 	frappe.db.set_value("Delivery Trip", pickup_name, "custom_follow_on_trip", trip.name, update_modified=False)
 
 	frappe.msgprint(
-		_("{0} created, already loaded on {1}. Choose Deliver to Customer or Deliver to Own "
-		  "Warehouse once you know where it is going.").format(
+		_("Delivery Trip {0} created (Draft) — {1} is already loaded and at the supplier's location with "
+		  "the remaining quantity. Choose Deliver to Customer or Deliver to Own Warehouse on it once you "
+		  "know where it is going, then submit.").format(
 			get_link_to_form("Delivery Trip", trip.name), pickup.vehicle
 		),
 		indicator="green",
+		title=_("Delivery Trip Created"),
 	)
 	return trip.name
