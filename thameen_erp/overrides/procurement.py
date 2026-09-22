@@ -1476,6 +1476,18 @@ def create_trip_after_pickup(purchase_receipt, pickup_trip=None):
 	blank, this falls back to the receipt's own `custom_delivery_trip`
 	(whichever trip that single Link happens to point at) for any older
 	caller that still only ever deals with one.
+
+	What is physically on the truck can be more than the truck is rated to
+	carry in one journey — a receipt legitimately landing the PO's whole
+	quantity on it (see `validate_pickup_receipt_warehouse`'s own single-
+	truck self-heal) is exactly that case. `_validate_vehicle_capacity` on
+	Delivery Trip is an absolute ceiling with no draft exception, so a
+	single trip carrying all of it can never even be inserted. Split it the
+	same way "Split Into Trips" does — the SAME vehicle and driver on every
+	load, since this is one truck doing several journeys, not several
+	trucks: only one of them can ever be open (submitted) at a time, the
+	rest sit as drafts until this one is delivered and the truck is free
+	to go back for the rest.
 	"""
 	frappe.has_permission("Delivery Trip", "create", throw=True)
 
@@ -1505,41 +1517,67 @@ def create_trip_after_pickup(purchase_receipt, pickup_trip=None):
 	if not on_truck:
 		frappe.throw(_("{0} has nothing on it yet.").format(pickup.vehicle))
 
-	trip = frappe.new_doc("Delivery Trip")
-	trip.company = pickup.company
-	trip.custom_supply_source = DIRECT
-	trip.custom_destination_type = "Decide After Loading"
-	trip.custom_supplier = pickup.custom_supplier
-	trip.custom_purchase_order = pickup.custom_purchase_order
-	trip.custom_purchase_receipt = pr.name
-	trip.vehicle = pickup.vehicle
-	trip.driver = pickup.driver
-	trip.flags.ignore_mandatory = True
+	rows = [
+		{
+			"item_code": row["item_code"],
+			"item_name": row.get("item_name") or row["item_code"],
+			"qty": flt(row["free"]),
+			"conversion_factor": 1,
+			"uom": row.get("stock_uom"),
+			"stock_uom": row.get("stock_uom"),
+			"source_warehouse": truck.get("warehouse"),
+		}
+		for row in on_truck
+	]
 
-	for row in on_truck:
-		trip.append(
-			"custom_trip_items",
-			{
-				"item_code": row["item_code"],
-				"item_name": row.get("item_name") or row["item_code"],
-				"qty": flt(row["free"]),
-				"uom": row.get("stock_uom"),
-				"stock_uom": row.get("stock_uom"),
-				"conversion_factor": 1,
-				"source_warehouse": truck.get("warehouse"),
-			},
+	capacity = flt(frappe.get_cached_value("Vehicle", pickup.vehicle, "custom_capacity"))
+	if capacity:
+		from thameen_erp.overrides.trip_split import split_by_capacity
+
+		loads = split_by_capacity(rows, capacity)
+	else:
+		loads = [rows]
+
+	created = []
+	for load in loads:
+		trip = frappe.new_doc("Delivery Trip")
+		trip.company = pickup.company
+		trip.custom_supply_source = DIRECT
+		trip.custom_destination_type = "Decide After Loading"
+		trip.custom_supplier = pickup.custom_supplier
+		trip.custom_purchase_order = pickup.custom_purchase_order
+		trip.custom_purchase_receipt = pr.name
+		trip.vehicle = pickup.vehicle
+		trip.driver = pickup.driver
+		trip.flags.ignore_mandatory = True
+
+		for row in load:
+			trip.append("custom_trip_items", row)
+
+		trip.insert()
+		created.append(trip.name)
+
+	# Informational only, same reasoning as `create_pickup_trips` — the
+	# pickup trip's own "View" button needs somewhere to go, but which of
+	# several same-truck follow-on trips it points at does not matter:
+	# `pending_second_leg_trips` only checks whether this is set at all.
+	frappe.db.set_value("Delivery Trip", pickup_name, "custom_follow_on_trip", created[-1], update_modified=False)
+
+	if len(created) == 1:
+		message = _(
+			"Delivery Trip {0} created (Draft) — {1} is already loaded and at the supplier's location with "
+			"the remaining quantity. Choose Deliver to Customer or Deliver to Own Warehouse on it once you "
+			"know where it is going, then submit."
+		).format(get_link_to_form("Delivery Trip", created[0]), pickup.vehicle)
+	else:
+		message = _(
+			"{0} is carrying more than its rated capacity, so this became {1} Delivery Trips (Draft): {2}. "
+			"Submit and deliver the first one, then assign {0} to the next once it is back and empty."
+		).format(
+			pickup.vehicle,
+			len(created),
+			", ".join(get_link_to_form("Delivery Trip", t) for t in created),
 		)
 
-	trip.insert()
-	frappe.db.set_value("Delivery Trip", pickup_name, "custom_follow_on_trip", trip.name, update_modified=False)
-
-	frappe.msgprint(
-		_("Delivery Trip {0} created (Draft) — {1} is already loaded and at the supplier's location with "
-		  "the remaining quantity. Choose Deliver to Customer or Deliver to Own Warehouse on it once you "
-		  "know where it is going, then submit.").format(
-			get_link_to_form("Delivery Trip", trip.name), pickup.vehicle
-		),
-		indicator="green",
-		title=_("Delivery Trip Created"),
-	)
-	return trip.name
+	frappe.msgprint(message, indicator="green", title=_("Delivery Trip Created"))
+	return created
