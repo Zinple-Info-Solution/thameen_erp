@@ -692,10 +692,16 @@ def validate_pickup_receipt_warehouse(doc, method=None):
 	every pickup PO referenced by an item row needs at least one matching
 	Pickup Vehicles row, and every item row's warehouse must be one of the
 	warehouses named for ITS OWN Purchase Order, not just any of them.
-	"""
-	if doc._action != "submit":
-		return
 
+	Self-heals the one case that is never actually ambiguous: a PO with only
+	ONE truck listed for it. There is nothing to choose between, so a
+	mismatched row's warehouse is silently corrected here, on every save —
+	not just when the browser's own auto-fill happened to already run. That
+	auto-fill is still what makes multi-truck rows line up correctly the
+	first time (there the choice is real, and only the dispatcher's own
+	quantities can settle it), so this only ever fills the single-truck gap
+	it leaves behind.
+	"""
 	po_names = list({row.purchase_order for row in doc.items if row.get("purchase_order")})
 	if not po_names:
 		return
@@ -705,7 +711,23 @@ def validate_pickup_receipt_warehouse(doc, method=None):
 	if not pickup_pos:
 		return
 
-	chosen = {row.warehouse: row.purchase_order for row in _pickup_vehicle_rows(doc, open_trips)}
+	chosen_rows = list(_pickup_vehicle_rows(doc, open_trips))
+	chosen = {row.warehouse: row.purchase_order for row in chosen_rows}
+	warehouses_by_po = {}
+	for row in chosen_rows:
+		warehouses_by_po.setdefault(row.purchase_order, set()).add(row.warehouse)
+
+	for row in doc.items:
+		if row.purchase_order not in pickup_pos:
+			continue
+		if chosen.get(row.warehouse) == row.purchase_order:
+			continue
+		candidates = warehouses_by_po.get(row.purchase_order) or set()
+		if len(candidates) == 1:
+			row.warehouse = next(iter(candidates))
+
+	if doc._action != "submit":
+		return
 
 	missing_pos = sorted(pickup_pos - set(chosen.values()))
 	if missing_pos:
