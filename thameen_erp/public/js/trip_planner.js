@@ -338,6 +338,7 @@ thameen.trip_planner._draw = function (dialog) {
 		);
 	};
 
+	let any_over = false;
 	const rows = plan
 		.map((p, i) => {
 			// Compared against what this row can actually claim: free room to
@@ -348,6 +349,7 @@ thameen.trip_planner._draw = function (dialog) {
 			// counts that cement toward the row, not against it.
 			const planable = thameen.trip_planner._planable(dialog, p.vehicle);
 			const over = planable !== null && flt(p.qty) > planable + TP_TOL;
+			if (over) any_over = true;
 			const { date, time } = thameen.trip_planner._split_dt(p.departure_time);
 			return `<tr class="${over ? "table-warning" : ""}">
 				<td>${i + 1}</td>
@@ -368,7 +370,11 @@ thameen.trip_planner._draw = function (dialog) {
 
 	const placed = {};
 	plan.forEach((p) => (placed[p.key] = flt(placed[p.key]) + flt(p.qty)));
-	let ok = plan.some((p) => flt(p.qty) > 0);
+	// A row already shown in red as "over by X" must not still be
+	// submittable — that red text is a warning only if the button ignores
+	// it, and the server ends up refusing the whole trip anyway once
+	// submitted. Block it here instead, same as any other unmet ceiling.
+	let ok = plan.some((p) => flt(p.qty) > 0) && !any_over;
 	const balance = Object.keys(o.limits)
 		.map((key) => {
 			const lim = o.limits[key];

@@ -764,6 +764,8 @@ def validate_pickup_receipt_warehouse(doc, method=None):
 
 		row.warehouse = only_warehouse
 
+	_split_unmatched_pickup_rows(doc, pickup_pos, warehouses_by_po)
+
 	if over_capacity and doc._action == "submit":
 		frappe.throw("<br>".join(over_capacity), title=_("Truck Over Capacity"))
 
@@ -797,6 +799,123 @@ def validate_pickup_receipt_warehouse(doc, method=None):
 			"<br>".join(errors),
 			title=_("Wrong Warehouse for Pickup Trip"),
 		)
+
+
+def _split_unmatched_pickup_rows(doc, pickup_pos, warehouses_by_po):
+	"""Server-side counterpart to the browser's own auto-split
+	(`apply_pickup_warehouse_to_items` in purchase_receipt.js): a PO picked
+	up by more than one truck is not something the single-candidate self-heal
+	above can fix (there is more than one warehouse it could mean), so a
+	receipt's one combined item row for that PO — the shape "Get Items From
+	Purchase Order" always produces, before any splitting happens — is left
+	completely untouched by it and reaches the final check below still wrong.
+
+	The browser already splits such a row itself, the moment a second
+	vehicle is added to Pickup Vehicles. This exists for whenever that never
+	ran: the receipt was built by a script, an API call, or an older/cached
+	page — anything that skips the client entirely. Same rule either way:
+	split each unmatched row against its own PO's real trip claims, an exact
+	qty match just gets its warehouse corrected, a bigger row gets carved
+	down to each claim with the remainder left for the next one."""
+	multi_pos = {po for po in pickup_pos if len(warehouses_by_po.get(po) or set()) > 1}
+	if not multi_pos:
+		return
+
+	trip_by_warehouse = {
+		row.warehouse: row.delivery_trip
+		for row in (doc.get("custom_pickup_vehicles") or [])
+		if row.warehouse and row.delivery_trip
+	}
+
+	def _row_qty(row):
+		return flt(row.qty) * (flt(row.conversion_factor) or 1)
+
+	changed = False
+
+	for po in multi_pos:
+		warehouses = warehouses_by_po.get(po) or set()
+		trip_names = [trip_by_warehouse[wh] for wh in warehouses if wh in trip_by_warehouse]
+		if not trip_names:
+			continue
+		claims_by_trip = _trip_claims(trip_names)
+
+		for wh in warehouses:
+			trip = trip_by_warehouse.get(wh)
+			if not trip:
+				continue
+
+			for claim in claims_by_trip.get(trip, []):
+				claim_qty = flt(claim["qty"])
+				if claim_qty <= 0:
+					continue
+
+				def _same_line(row, claim=claim, po=po):
+					if row.get("purchase_order_item"):
+						return row.purchase_order_item == claim["po_detail"]
+					return row.purchase_order == po and row.item_code == claim["item_code"]
+
+				already = any(
+					row.warehouse == wh and _same_line(row) and abs(_row_qty(row) - claim_qty) < QTY_TOLERANCE
+					for row in doc.items
+				)
+				if already:
+					continue
+
+				# Excludes every row already sitting on ANY of this PO's known
+				# vehicle warehouses, not just this claim's own — otherwise a
+				# row a previous claim in this same loop already matched (and
+				# happens to equal this claim's qty too) would get its
+				# warehouse stolen by the "exact" check below instead of being
+				# left alone.
+				candidates = [row for row in doc.items if row.warehouse not in warehouses and _same_line(row)]
+
+				exact = next(
+					(row for row in candidates if abs(_row_qty(row) - claim_qty) < QTY_TOLERANCE), None
+				)
+				if exact:
+					exact.warehouse = wh
+					changed = True
+					continue
+
+				donor = min(
+					(row for row in candidates if _row_qty(row) > claim_qty + QTY_TOLERANCE),
+					key=lambda row: flt(row.qty),
+					default=None,
+				)
+				if not donor:
+					continue
+
+				conv = flt(donor.conversion_factor) or 1
+				donor_stock_qty = _row_qty(donor)
+				new_qty = claim_qty / conv
+				doc.append(
+					"items",
+					{
+						"item_code": donor.item_code,
+						"item_name": donor.item_name,
+						"description": donor.description,
+						"uom": donor.uom,
+						"stock_uom": donor.stock_uom,
+						"conversion_factor": donor.conversion_factor,
+						"rate": donor.rate,
+						"purchase_order": donor.purchase_order,
+						"purchase_order_item": donor.purchase_order_item,
+						"warehouse": wh,
+						"qty": new_qty,
+						"received_qty": new_qty,
+					},
+				)
+				donor.qty = (donor_stock_qty - claim_qty) / conv
+				donor.received_qty = donor.qty
+				changed = True
+
+	if changed:
+		# This validate hook runs after the document's own validate() already
+		# computed rate/amount fields for the rows that existed at the time —
+		# a row split off here misses that pass entirely and would otherwise
+		# fail on a missing base_rate. Re-running it now covers every row,
+		# old and new alike.
+		doc.calculate_taxes_and_totals()
 
 
 def _pickup_vehicle_rows(doc, open_trips):
@@ -1538,23 +1657,91 @@ def create_trip_after_pickup(purchase_receipt, pickup_trip=None):
 	else:
 		loads = [rows]
 
+	# This PO can already have its own trip waiting on it — Draft, no
+	# vehicle yet — when it was raised for a specific shortfall: its
+	# destination (Sales Order / route) was already decided back when that
+	# shortfall was planned (see `make_purchase_order`, which stamps the
+	# trip's name onto the new PO's `custom_purchase_order`). The first load
+	# off this truck fills that trip in — vehicle, driver, and each row's
+	# qty trimmed down to what this load actually covers — instead of
+	# leaving it to sit there unused while a second, destination-less trip
+	# gets created right alongside it for the exact same need. Only the
+	# first load gets this treatment: one truck, one trip per journey, same
+	# as the capacity split already gives every other load its own plain
+	# "Decide After Loading" trip.
+	#
+	# Deliberately NOT `po_trips.waiting_trip_for_receipt` — that traces
+	# through the PO's own `custom_delivery_trip`, which `create_pickup_trips`
+	# above has already overwritten to point at itself (kept updated purely
+	# for the PO's "View" button, per its own docstring) by the time this
+	# runs. Searching the OTHER direction — which trip names THIS PO as its
+	# `custom_purchase_order` — is unaffected by that: nothing after
+	# `make_purchase_order` ever touches it.
+	waiting_name = None
+	if pickup.custom_purchase_order:
+		waiting_rows = frappe.get_all(
+			"Delivery Trip",
+			filters={
+				"custom_purchase_order": pickup.custom_purchase_order,
+				"docstatus": 0,
+				"vehicle": ("is", "not set"),
+			},
+			fields=["name"],
+			limit_page_length=1,
+		)
+		if waiting_rows:
+			waiting_name = waiting_rows[0].name
+	reused_waiting = bool(waiting_name)
+
 	created = []
 	for load in loads:
-		trip = frappe.new_doc("Delivery Trip")
-		trip.company = pickup.company
-		trip.custom_supply_source = DIRECT
-		trip.custom_destination_type = "Decide After Loading"
-		trip.custom_supplier = pickup.custom_supplier
-		trip.custom_purchase_order = pickup.custom_purchase_order
-		trip.custom_purchase_receipt = pr.name
-		trip.vehicle = pickup.vehicle
-		trip.driver = pickup.driver
-		trip.flags.ignore_mandatory = True
+		if waiting_name:
+			trip = frappe.get_doc("Delivery Trip", waiting_name)
+			trip.custom_supply_source = DIRECT
+			trip.custom_supplier = pickup.custom_supplier
+			trip.custom_purchase_order = pickup.custom_purchase_order
+			trip.custom_purchase_receipt = pr.name
+			trip.vehicle = pickup.vehicle
+			trip.driver = pickup.driver
+			trip.flags.ignore_mandatory = True
 
-		for row in load:
-			trip.append("custom_trip_items", row)
+			remaining = {row["item_code"]: flt(row["qty"]) for row in load}
+			for item_row in trip.custom_trip_items:
+				available = remaining.get(item_row.item_code, 0.0)
+				item_row.qty = min(flt(item_row.qty), available)
+				remaining[item_row.item_code] = available - item_row.qty
+			# Whatever this load carries that the waiting trip's own rows
+			# never asked for (a different item, or more of one than it
+			# needed) still has to go somewhere — added as its own row
+			# rather than silently left off the trip.
+			for row in load:
+				extra = remaining.get(row["item_code"], 0.0)
+				if extra > QTY_TOLERANCE:
+					trip.append("custom_trip_items", {**row, "qty": extra})
+			# A row this load had nothing left to cover (a line the waiting
+			# trip wanted that this particular truckload does not carry) is
+			# dropped rather than saved at qty 0.
+			trip.set("custom_trip_items", [r for r in trip.custom_trip_items if flt(r.qty) > QTY_TOLERANCE])
 
-		trip.insert()
+			trip.save()
+			waiting_name = None
+		else:
+			trip = frappe.new_doc("Delivery Trip")
+			trip.company = pickup.company
+			trip.custom_supply_source = DIRECT
+			trip.custom_destination_type = "Decide After Loading"
+			trip.custom_supplier = pickup.custom_supplier
+			trip.custom_purchase_order = pickup.custom_purchase_order
+			trip.custom_purchase_receipt = pr.name
+			trip.vehicle = pickup.vehicle
+			trip.driver = pickup.driver
+			trip.flags.ignore_mandatory = True
+
+			for row in load:
+				trip.append("custom_trip_items", row)
+
+			trip.insert()
+
 		created.append(trip.name)
 
 	# Informational only, same reasoning as `create_pickup_trips` — the
@@ -1563,7 +1750,12 @@ def create_trip_after_pickup(purchase_receipt, pickup_trip=None):
 	# `pending_second_leg_trips` only checks whether this is set at all.
 	frappe.db.set_value("Delivery Trip", pickup_name, "custom_follow_on_trip", created[-1], update_modified=False)
 
-	if len(created) == 1:
+	if len(created) == 1 and reused_waiting:
+		message = _(
+			"{1} is already loaded and at the supplier's location — filled straight into its existing "
+			"waiting trip {0} (Draft), destination already set. Check the quantities and submit."
+		).format(get_link_to_form("Delivery Trip", created[0]), pickup.vehicle)
+	elif len(created) == 1:
 		message = _(
 			"Delivery Trip {0} created (Draft) — {1} is already loaded and at the supplier's location with "
 			"the remaining quantity. Choose Deliver to Customer or Deliver to Own Warehouse on it once you "

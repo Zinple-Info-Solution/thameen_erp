@@ -37,6 +37,22 @@ const PICKUP_NEXT_STATUS = {
 
 frappe.ui.form.on("Delivery Trip", {
 	setup(frm) {
+		// "Decide After Loading" is a placeholder the system sets for itself
+		// — a Direct-from-Supplier trip auto-created with nowhere fixed to go
+		// yet (see create_trip_after_pickup) — never a real choice for a
+		// dispatcher planning a trip by hand. Left out of the dropdown here;
+		// still a valid state under the hood (the DocType's own options are
+		// untouched), so a trip already sitting in it keeps displaying,
+		// saving and running exactly as before — this only narrows what a
+		// fresh pick from this field offers.
+		frm.set_df_property(
+			"custom_trip_route",
+			"options",
+			Object.keys(ROUTE_MAP)
+				.filter((route) => route !== "Supplier to Decide After Loading")
+				.join("\n")
+		);
+
 		frm.set_query("custom_loading_warehouse", () => ({
 			filters: { is_group: 0, company: frm.doc.company, custom_is_vehicle_warehouse: 0 },
 		}));

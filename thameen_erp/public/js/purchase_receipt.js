@@ -22,7 +22,21 @@ frappe.ui.form.on("Purchase Receipt", {
 			frm.add_custom_button(frm.doc.custom_delivery_trip,
 				() => frappe.set_route("Form", "Delivery Trip", frm.doc.custom_delivery_trip), __("View"));
 		}
-		if (frm.doc.docstatus === 0) add_add_pickup_vehicles_button(frm);
+		if (frm.doc.docstatus === 0) {
+			add_add_pickup_vehicles_button(frm);
+			// A receipt mapped straight off a Purchase Order (or one you are
+			// still filling in) that has an open pickup trip against it: the
+			// Pickup Vehicles table fills itself in, so there is nothing left
+			// to click before submitting — same lookup the button above runs
+			// by hand, just run once automatically. Only once per document,
+			// not on every refresh: deleting a row you don't want on this
+			// receipt must stay deleted, not get silently re-added the next
+			// time the form re-renders.
+			if (!frm.__pickup_vehicles_auto_filled) {
+				frm.__pickup_vehicles_auto_filled = true;
+				if (!(frm.doc.custom_pickup_vehicles || []).length) fill_pickup_vehicles(frm, { silent: true });
+			}
+		}
 		if (frm.doc.docstatus !== 1) return;
 
 		hide_other_receipt_create_buttons(frm);
@@ -53,40 +67,52 @@ function receipt_po_names(frm) {
 // on a pickup trip for this PO; this does that lookup once and adds
 // whichever ones are not already in the table, same idea as
 // `add_waiting_trip_button` below but for the newer multi-vehicle case.
-function add_add_pickup_vehicles_button(frm) {
+//
+// Used two ways: automatically once, the first time a draft with a pickup
+// trip's PO on it loads with the table still empty (see `refresh` above —
+// `silent: true` there, so an ordinary receipt with nothing to settle stays
+// quiet), and by the "Add Pickup Vehicles" button below for topping it up
+// by hand afterward (rows added later, a truck forgotten the first time).
+function fill_pickup_vehicles(frm, opts) {
+	const silent = !!(opts && opts.silent);
 	const po_names = receipt_po_names(frm);
 	if (!po_names.length) return;
 
-	frm.add_custom_button(__("Add Pickup Vehicles"), () => {
-		frappe.call({
-			method: "thameen_erp.overrides.procurement.pickup_vehicles_for_pos",
-			args: { purchase_orders: JSON.stringify(po_names) },
-			freeze: true,
-			callback({ message: candidates }) {
-				if (!candidates || !candidates.length) {
-					frappe.msgprint(__("No vehicle has an open pickup trip against this receipt's Purchase Order(s)."));
-					return;
-				}
-				const already = new Set((frm.doc.custom_pickup_vehicles || []).map((r) => r.vehicle));
-				let added = 0;
-				candidates
-					.filter((c) => !already.has(c.vehicle))
-					.forEach((c) => {
-						const { claims, purchase_order, ...fields } = c;
-						const row = frm.add_child("custom_pickup_vehicles");
-						Object.assign(row, fields);
-						apply_pickup_warehouse_to_items(frm, { warehouse: c.warehouse, claims, purchase_order });
-						added += 1;
-					});
-				frm.refresh_field("custom_pickup_vehicles");
-				frm.refresh_field("items");
-				frappe.show_alert({
-					message: added ? __("{0} vehicle(s) added.", [added]) : __("Already listed."),
-					indicator: added ? "green" : "orange",
+	frappe.call({
+		method: "thameen_erp.overrides.procurement.pickup_vehicles_for_pos",
+		args: { purchase_orders: JSON.stringify(po_names) },
+		freeze: !silent,
+		callback({ message: candidates }) {
+			if (!candidates || !candidates.length) {
+				if (!silent) frappe.msgprint(__("No vehicle has an open pickup trip against this receipt's Purchase Order(s)."));
+				return;
+			}
+			const already = new Set((frm.doc.custom_pickup_vehicles || []).map((r) => r.vehicle));
+			let added = 0;
+			candidates
+				.filter((c) => !already.has(c.vehicle))
+				.forEach((c) => {
+					const { claims, purchase_order, ...fields } = c;
+					const row = frm.add_child("custom_pickup_vehicles");
+					Object.assign(row, fields);
+					apply_pickup_warehouse_to_items(frm, { warehouse: c.warehouse, claims, purchase_order });
+					added += 1;
 				});
-			},
-		});
+			frm.refresh_field("custom_pickup_vehicles");
+			frm.refresh_field("items");
+			if (added) {
+				frappe.show_alert({ message: __("{0} pickup vehicle(s) filled in — check and submit.", [added]), indicator: "green" });
+			} else if (!silent) {
+				frappe.show_alert({ message: __("Already listed."), indicator: "orange" });
+			}
+		},
 	});
+}
+
+function add_add_pickup_vehicles_button(frm) {
+	const po_names = receipt_po_names(frm);
+	if (!po_names.length) return;
+	frm.add_custom_button(__("Add Pickup Vehicles"), () => fill_pickup_vehicles(frm, { silent: false }));
 }
 
 frappe.ui.form.on("Purchase Receipt Pickup Vehicle", {
@@ -117,37 +143,93 @@ const PICKUP_QTY_TOL = 0.01;
 // go set the same warehouse a second time, by hand, on every item row it
 // applies to.
 //
-// Two ways a row is matched to a vehicle's claim, in order:
-//   1. `po_detail` + qty — precise, but only works for a row pulled in via
-//      "Get Items From Purchase Order" (or the receipt's own standard
-//      Create button off the PO), which is the only thing that ever stamps
+// A row is matched to a claim by, in order:
+//   1. `po_detail` — precise, but only works for a row pulled in via "Get
+//      Items From Purchase Order" (or the receipt's own standard Create
+//      button off the PO), which is the only thing that ever stamps
 //      `purchase_order_item` onto a row in the first place.
-//   2. `purchase_order` + item code + qty — the fallback for a row typed in
-//      by hand, which never gets `purchase_order_item` set at all.
-// Either way, qty is what tells two vehicles apart when they split the very
-// same PO line (both trips carry the same po_detail / item code, only how
-// much each one actually claimed differs) — a row whose qty does not match
-// any claim is left alone rather than guessed at.
+//   2. `purchase_order` + item code — the fallback for a row typed in by
+//      hand, which never gets `purchase_order_item` set at all.
+//
+// One PO line picked up by several trucks still arrives as ONE combined row
+// on the receipt (the user is not expected to know in advance how many
+// trucks it will take, or to split it by hand) — "Get Items From Purchase
+// Order" just carries the line's full qty through unchanged. So a claim
+// whose qty does not exactly match any row is not left alone: the smallest
+// row still big enough to cover it is split — this claim's qty carved into
+// its own new row on this vehicle's warehouse, the rest staying behind on
+// the original row for the next vehicle's claim to match against.
 function apply_pickup_warehouse_to_items(frm, info) {
 	if (!info.warehouse || !info.claims || !info.claims.length) return;
 	let changed = false;
-	(frm.doc.items || []).forEach((item) => {
-		if (item.warehouse === info.warehouse) return;
-		const item_qty = flt(item.qty) * (flt(item.conversion_factor) || 1);
 
-		const matches = item.purchase_order_item
-			? info.claims.some(
-					(c) => c.po_detail === item.purchase_order_item && Math.abs(flt(c.qty) - item_qty) < PICKUP_QTY_TOL
-			  )
-			: item.purchase_order === info.purchase_order &&
-			  info.claims.some((c) => c.item_code === item.item_code && Math.abs(flt(c.qty) - item_qty) < PICKUP_QTY_TOL);
+	const same_line = (item, claim) =>
+		item.purchase_order_item
+			? item.purchase_order_item === claim.po_detail
+			: item.purchase_order === info.purchase_order && item.item_code === claim.item_code;
 
-		if (matches) {
-			frappe.model.set_value(item.doctype, item.name, "warehouse", info.warehouse);
+	info.claims.forEach((claim) => {
+		const claim_qty = flt(claim.qty);
+		if (claim_qty <= 0) return;
+
+		const items = frm.doc.items || [];
+
+		// Already sitting on this vehicle's own warehouse with the right qty
+		// — nothing left to do for this claim.
+		const already = items.some(
+			(item) =>
+				item.warehouse === info.warehouse &&
+				same_line(item, claim) &&
+				Math.abs(flt(item.qty) * (flt(item.conversion_factor) || 1) - claim_qty) < PICKUP_QTY_TOL
+		);
+		if (already) return;
+
+		const candidates = items.filter((item) => item.warehouse !== info.warehouse && same_line(item, claim));
+
+		// A row whose qty already matches this claim exactly just needs its
+		// warehouse corrected — no split needed.
+		const exact = candidates.find(
+			(item) => Math.abs(flt(item.qty) * (flt(item.conversion_factor) || 1) - claim_qty) < PICKUP_QTY_TOL
+		);
+		if (exact) {
+			frappe.model.set_value(exact.doctype, exact.name, "warehouse", info.warehouse);
 			changed = true;
+			return;
 		}
+
+		// Otherwise carve this claim's qty out of the smallest row still big
+		// enough to cover it, leaving the remainder on that row for another
+		// vehicle's claim.
+		const donor = candidates
+			.filter((item) => flt(item.qty) * (flt(item.conversion_factor) || 1) > claim_qty + PICKUP_QTY_TOL)
+			.sort((a, b) => flt(a.qty) - flt(b.qty))[0];
+		if (!donor) return;
+
+		const conv = flt(donor.conversion_factor) || 1;
+		const donor_stock_qty = flt(donor.qty) * conv;
+
+		const new_row = frm.add_child("items");
+		Object.assign(new_row, {
+			item_code: donor.item_code,
+			item_name: donor.item_name,
+			description: donor.description,
+			uom: donor.uom,
+			stock_uom: donor.stock_uom,
+			conversion_factor: donor.conversion_factor,
+			rate: donor.rate,
+			purchase_order: donor.purchase_order,
+			purchase_order_item: donor.purchase_order_item,
+			warehouse: info.warehouse,
+			qty: claim_qty / conv,
+		});
+		frappe.model.set_value(donor.doctype, donor.name, "qty", (donor_stock_qty - claim_qty) / conv);
+		changed = true;
 	});
-	if (changed) frappe.show_alert({ message: __("Item row warehouse(s) updated to match {0}.", [info.warehouse]), indicator: "green" });
+
+	if (changed) {
+		frm.refresh_field("items");
+		frappe.show_alert({ message: __("Item row(s) split and warehouse(s) matched to {0}.", [info.warehouse]), indicator: "green" });
+	}
 }
 
 // Re-runs the same matching for every vehicle already in the Pickup
