@@ -1388,6 +1388,34 @@ def _planned_qty_on_other_trips(so_details, exclude_trip=None):
 	return {row.so_detail: flt(row.qty) for row in query.run(as_dict=True)}
 
 
+def pending_trips_for_so_details(so_details):
+	"""Delivery Trips (submitted, not yet Completed) planned against any of
+	these Sales Order lines — the single source of truth for "is this Sales
+	Order line still being delivered", shared by the Sales Invoice block
+	(`sales_invoice._validate_delivery_trip_completed`) and the Sales
+	Order's own Create menu (`sales_order.pending_delivery_trips`, which
+	hides Sales Invoice there while any of these are still open)."""
+	so_details = [d for d in (so_details or []) if d]
+	if not so_details:
+		return []
+
+	trip_names = set(
+		frappe.get_all(
+			"Delivery Trip Item",
+			filters={"so_detail": ("in", so_details)},
+			pluck="parent",
+		)
+	)
+	if not trip_names:
+		return []
+
+	return frappe.get_all(
+		"Delivery Trip",
+		filters={"name": ("in", list(trip_names)), "docstatus": 1, "status": ("!=", "Completed")},
+		fields=["name", "status"],
+	)
+
+
 def close_sales_order_if_complete(sales_order):
 	"""Close the SO only when every trip is done and delivery is 100%."""
 	if not frappe.db.get_single_value("Thameen Fleet Settings", "auto_close_sales_order"):

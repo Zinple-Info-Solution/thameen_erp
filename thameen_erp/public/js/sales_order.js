@@ -10,6 +10,7 @@ frappe.ui.form.on("Sales Order", {
 		).addClass("btn-primary");
 
 		hide_other_so_create_buttons(frm);
+		hide_sales_invoice_until_delivered(frm);
 		show_trip_summary(frm);
 	},
 });
@@ -53,6 +54,43 @@ function hide_other_so_create_buttons(frm) {
 	};
 	remove();
 	[300, 800, 1500].forEach((ms) => setTimeout(remove, ms));
+}
+
+// Unlike the rest of SO_OTHER_CREATE_BUTTONS, Sales Invoice is not hidden
+// unconditionally — billing is meant to run independently of delivery. It
+// only gets pulled here while this order still has a Delivery Trip open
+// against it (submitted, not yet Completed): billing before that locks in a
+// qty/rate a dispatcher could still change. Server-side twin of this same
+// rule lives in sales_invoice._validate_delivery_trip_completed, which
+// still refuses the invoice even if something reaches it another way (the
+// API, a script, this exact button before the server call below returns).
+function hide_sales_invoice_until_delivered(frm) {
+	frappe.call({
+		method: "thameen_erp.overrides.sales_order.pending_delivery_trips",
+		args: { sales_order: frm.doc.name },
+		callback({ message: pending }) {
+			if (!pending || !pending.length) return;
+
+			const remove = () => {
+				if (!frm.page.inner_toolbar) return;
+				frm.page.inner_toolbar.find(`[data-label="${encodeURIComponent(__("Sales Invoice"))}"]`).remove();
+				frm.page.inner_toolbar.find(".inner-group-button").each(function () {
+					if (!$(this).find(".dropdown-item").length) $(this).remove();
+				});
+			};
+			remove();
+			[300, 800, 1500].forEach((ms) => setTimeout(remove, ms));
+
+			frm.dashboard.add_comment(
+				__("Sales Invoice is hidden until delivery finishes — {0} still open: {1}.", [
+					pending.length > 1 ? __("Delivery Trips") : __("Delivery Trip"),
+					pending.map((t) => `${t.name} (${__(t.status)})`).join(", "),
+				]),
+				"orange",
+				true
+			);
+		},
+	});
 }
 
 // Company-wide stock against what this order still owes, checked the moment

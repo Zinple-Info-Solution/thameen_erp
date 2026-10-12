@@ -22,7 +22,7 @@ import frappe
 from frappe import _
 from frappe.utils import add_to_date, flt, get_datetime, get_link_to_form, now_datetime
 
-from thameen_erp.overrides.delivery_trip import _planned_qty_on_other_trips
+from thameen_erp.overrides.delivery_trip import _planned_qty_on_other_trips, pending_trips_for_so_details
 
 NO_LOCATION = "__default__"
 ITEM_SEP = " \u00a6 "
@@ -219,6 +219,18 @@ def preview_trip_plan(sales_order):
 		"drivers": _drivers_for_planning(),
 		"departure_time": str(_default_departure(so)),
 	}
+
+
+@frappe.whitelist()
+def pending_delivery_trips(sales_order):
+	"""Delivery Trip(s) still open (submitted, not yet Completed) against
+	this Sales Order's own lines — the form's own Create menu hides Sales
+	Invoice while this returns anything, so billing can't start before
+	delivery actually finishes. Mirrors `sales_invoice._validate_delivery_
+	trip_completed`, the server-side check that still backstops this even
+	if an invoice reaches `validate` some other way."""
+	so_details = frappe.get_all("Sales Order Item", filters={"parent": sales_order}, pluck="name")
+	return pending_trips_for_so_details(so_details)
 
 
 @frappe.whitelist()
