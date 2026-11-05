@@ -34,7 +34,8 @@ def execute(filters=None):
 		direct = flt(g.get("direct_cost"))
 		periodic = flt(g.get("periodic_cost"))
 		total_cost = direct + periodic
-		profit = revenue - total_cost
+		total_revenue = revenue + goods_revenue
+		profit = total_revenue - total_cost
 		distance = flt(t.get("distance"))
 
 		data.append(
@@ -47,11 +48,12 @@ def execute(filters=None):
 				"distance": distance,
 				"revenue": revenue,
 				"goods_revenue": goods_revenue,
+				"total_revenue": total_revenue,
 				"direct_cost": direct,
 				"periodic_cost": periodic,
 				"total_cost": total_cost,
 				"profit": profit,
-				"margin": (profit / revenue * 100) if revenue else 0,
+				"margin": (profit / total_revenue * 100) if total_revenue else 0,
 				"cost_per_km": (total_cost / distance) if distance else 0,
 			}
 		)
@@ -192,7 +194,7 @@ def get_chart(data):
 		"data": {
 			"labels": [r["vehicle"] for r in top],
 			"datasets": [
-				{"name": _("Revenue"), "values": [r["revenue"] for r in top]},
+				{"name": _("Revenue"), "values": [r["total_revenue"] for r in top]},
 				{"name": _("Total Cost"), "values": [r["total_cost"] for r in top]},
 			],
 		},
@@ -213,6 +215,12 @@ def get_columns():
 		{
 			"label": _("Goods Revenue"),
 			"fieldname": "goods_revenue",
+			"fieldtype": "Currency",
+			"width": 130,
+		},
+		{
+			"label": _("Total Revenue"),
+			"fieldname": "total_revenue",
 			"fieldtype": "Currency",
 			"width": 130,
 		},

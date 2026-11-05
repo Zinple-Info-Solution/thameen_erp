@@ -19,57 +19,45 @@ frappe.ui.form.on("Purchase Invoice", {
 	},
 
 	custom_add_rebate(frm) {
-		recalculate_all_rebates(frm);
+		// Turning rebate tracking off clears whatever amount was typed in --
+		// turning it on leaves every row blank for the real amount to be
+		// typed in directly (see overrides/purchase_invoice.py). A PO-linked
+		// row carries its own value across unchanged either way, same as
+		// Expected Net Price -- untouched here.
+		if (!frm.doc.custom_add_rebate) {
+			(frm.doc.items || []).forEach((row) => {
+				if (row.po_detail || row.pr_detail) return;
+				if (flt(row.custom_rebate_amount)) {
+					frappe.model.set_value(row.doctype, row.name, "custom_rebate_amount", 0);
+				}
+			});
+		}
 	},
 });
 
 frappe.ui.form.on("Purchase Invoice Item", {
-	custom_expected_discount_amount(frm, cdt, cdn) {
-		const row = locals[cdt][cdn];
-		const qty = flt(row.qty) || 1;
-		frappe.model.set_value(cdt, cdn, "custom_agreed_net_price",
-			flt(row.rate) - flt(row.custom_expected_discount_amount) / qty);
+	// Expected Net Price is the entered value; Rebate Due is derived from
+	// it against this row's own rate — recomputed here so it shows live
+	// without waiting for a server round-trip (the real figure is set
+	// server-side anyway, in thameen_erp.overrides.purchase.
+	// _compute_rebate_from_agreed_price, on every save).
+	custom_agreed_net_price(frm, cdt, cdn) {
+		recalc_rebate_due(cdt, cdn);
 	},
 	rate(frm, cdt, cdn) {
-		const row = locals[cdt][cdn];
-		const qty = flt(row.qty) || 1;
-		frappe.model.set_value(cdt, cdn, "custom_agreed_net_price",
-			flt(row.rate) - flt(row.custom_expected_discount_amount) / qty);
+		recalc_rebate_due(cdt, cdn);
 	},
-
 	qty(frm, cdt, cdn) {
-		calculate_row_rebate(frm, cdt, cdn);
-	},
-	price_list_rate(frm, cdt, cdn) {
-		calculate_row_rebate(frm, cdt, cdn);
-	},
-	item_code(frm, cdt, cdn) {
-		setTimeout(() => calculate_row_rebate(frm, cdt, cdn), 300);
-	},
-	custom_rebate_percentage(frm, cdt, cdn) {
-		calculate_row_rebate(frm, cdt, cdn);
+		recalc_rebate_due(cdt, cdn);
 	},
 });
 
-// ─── Supplier rebate ──────────────────────────────────────────────
-
-function calculate_row_rebate(frm, cdt, cdn) {
+function recalc_rebate_due(cdt, cdn) {
 	const row = locals[cdt][cdn];
 	if (!row) return;
-
-	const base_rate = flt(row.price_list_rate) || flt(row.rate);
-	const percentage = frm.doc.custom_add_rebate ? flt(row.custom_rebate_percentage) : 0;
-	const rebate_per_unit = (base_rate * percentage) / 100;
-	const new_rate = base_rate - rebate_per_unit;
-
-	frappe.model.set_value(cdt, cdn, "custom_rebate_amount", rebate_per_unit * flt(row.qty));
-
-	if (flt(row.rate).toFixed(4) !== new_rate.toFixed(4)) {
-		// triggers ERPNext's built-in amount / net_total / grand_total recalculation
-		frappe.model.set_value(cdt, cdn, "rate", new_rate);
-	}
-}
-
-function recalculate_all_rebates(frm) {
-	(frm.doc.items || []).forEach((row) => calculate_row_rebate(frm, row.doctype, row.name));
+	const agreed = flt(row.custom_agreed_net_price);
+	const rate = flt(row.rate);
+	const per_unit = agreed && agreed < rate ? rate - agreed : 0;
+	frappe.model.set_value(cdt, cdn, "custom_rebate_per_unit", per_unit);
+	frappe.model.set_value(cdt, cdn, "custom_expected_discount_amount", per_unit * flt(row.qty));
 }

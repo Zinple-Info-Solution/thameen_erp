@@ -85,26 +85,50 @@ doc_events = {
 		],
 	},
 	"Purchase Order": {
+		# before_validate computes the percentage rebate's tracking amount
+		# (custom_rebate_amount) -- it never touches item.rate, so order vs.
+		# the Expected Rebate calc right after it no longer matters, left as
+		# the harmless default.
+		"before_validate": "thameen_erp.overrides.purchase_invoice.before_validate",
 		"validate": "thameen_erp.overrides.purchase.validate_expected_discount",
 		# Direct-from-supplier trips: drop the trip's order link if the PO dies.
 		"on_cancel": "thameen_erp.overrides.procurement.purchase_order_on_cancel",
 	},
 	"Purchase Invoice": {
-		# before_validate must run first: it rewrites item.rate for the rebate so
-		# ERPNext's own amount / net_total / grand_total calculation picks it up.
+		# before_validate computes the percentage rebate's tracking amount
+		# (custom_rebate_amount) -- it never touches item.rate or any total.
 		"before_validate": "thameen_erp.overrides.purchase_invoice.before_validate",
 		"validate": "thameen_erp.overrides.purchase.validate_purchase_invoice",
 		"on_update": "thameen_erp.overrides.purchase_invoice.on_update",
 		"on_submit": [
 			"thameen_erp.overrides.purchase.flag_expected_credit_notes",
+			"thameen_erp.overrides.purchase.write_back_actual_purchase_price",
+			"thameen_erp.overrides.purchase.adjust_rebate_for_return",
 			"thameen_erp.overrides.purchase_invoice.on_submit",
 		],
-		"on_cancel": "thameen_erp.overrides.purchase_invoice.on_cancel",
+		"on_cancel": [
+			"thameen_erp.overrides.purchase.reverse_actual_purchase_price",
+			"thameen_erp.overrides.purchase.adjust_rebate_for_return",
+			"thameen_erp.overrides.purchase_invoice.on_cancel",
+		],
 		"on_trash": "thameen_erp.overrides.purchase_invoice.on_trash",
+	},
+	# A Supplier Credit Note's own controller already writes Credit Note
+	# Received / Status onto the Purchase Invoice line it settles, on both
+	# submit and cancel — this only finishes the job: Outstanding (which it
+	# does not compute) and mirroring all three onto the Purchase Order and
+	# Purchase Receipt lines too (thameen_erp.overrides.purchase.
+	# sync_po_rebate_after_credit_note).
+	"Supplier Credit Note": {
+		"on_submit": "thameen_erp.overrides.purchase.sync_po_rebate_after_credit_note",
+		"on_cancel": "thameen_erp.overrides.purchase.sync_po_rebate_after_credit_note",
 	},
 	# Direct-from-supplier trips: keep the trip's receipt/order links honest
 	# when purchasing cancels something underneath them.
 	"Purchase Receipt": {
+		# Same percentage-rebate tracking as Purchase Order/Invoice above --
+		# before_validate never touches item.rate or any total.
+		"before_validate": "thameen_erp.overrides.purchase_invoice.before_validate",
 		"on_submit": [
 			"thameen_erp.overrides.procurement.link_shortfall_receipt_to_trip",
 			"thameen_erp.overrides.vehicle_stock.refresh_vehicle_loads_for_doc",
@@ -116,6 +140,7 @@ doc_events = {
 		"validate": [
 			"thameen_erp.overrides.vehicle_stock.validate_vehicle_warehouse_capacity",
 			"thameen_erp.overrides.procurement.validate_pickup_receipt_warehouse",
+			"thameen_erp.overrides.purchase.validate_purchase_receipt",
 		],
 	},
 	# A vehicle warehouse is the truck, so it cannot hold more than the truck

@@ -8,6 +8,9 @@
   "item_code",
   "qty",
   "expected_amount",
+  "flat_rebate_amount",
+  "flat_rebate_received",
+  "flat_rebate_outstanding",
   "actual_amount",
   "variance",
   "row_status"
@@ -18,8 +21,6 @@
    "fieldtype": "Data",
    "label": "PI Item Row",
    "reqd": 1,
-   "in_list_view": 1,
-   "columns": 2,
    "description": "Row name of the Purchase Invoice Item this credit note settles."
   },
   {
@@ -41,10 +42,36 @@
   {
    "fieldname": "expected_amount",
    "fieldtype": "Currency",
-   "label": "Expected",
+   "label": "Rebate Due",
    "read_only": 1,
    "in_list_view": 1,
-   "columns": 2
+   "columns": 2,
+   "description": "Expected Net Price mechanism -- what the invoice's own Rebate Due says is owed back."
+  },
+  {
+   "fieldname": "flat_rebate_amount",
+   "fieldtype": "Currency",
+   "label": "Rebate Amount",
+   "read_only": 1,
+   "in_list_view": 1,
+   "columns": 2,
+   "description": "The OTHER rebate mechanism -- the flat 'Add Rebate' amount typed directly on the invoice line. Settled separately from Rebate Due/Actual below, using the two fields that follow."
+  },
+  {
+   "fieldname": "flat_rebate_received",
+   "fieldtype": "Currency",
+   "label": "Rebate Amount Received",
+   "in_list_view": 1,
+   "columns": 2,
+   "description": "How much of this line's flat Rebate Amount the supplier has actually credited back."
+  },
+  {
+   "fieldname": "flat_rebate_outstanding",
+   "fieldtype": "Currency",
+   "label": "Rebate Amount Outstanding",
+   "read_only": 1,
+   "columns": 2,
+   "description": "Rebate Amount minus Rebate Amount Received, across all Credit Notes against this line."
   },
   {
    "fieldname": "actual_amount",

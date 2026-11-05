@@ -35,6 +35,10 @@ const PICKUP_NEXT_STATUS = {
 	"Trip Reached and Loaded": "Trip Reached",
 };
 
+// Matches QTY_TOLERANCE in overrides/delivery_trip.py — the same rounding
+// slack the server uses to decide whether a row is genuinely short.
+const PK_TOL = 0.001;
+
 frappe.ui.form.on("Delivery Trip", {
 	setup(frm) {
 		// "Decide After Loading" is a placeholder the system sets for itself
@@ -495,7 +499,8 @@ function add_status_buttons(frm) {
 	const next = NEXT_STATUS[frm.doc.status];
 	if (!next) return;
 
-	frm.page.set_primary_action(__("Mark {0}", [next]), () => {
+	const label = next === "Loading" ? __("Start Loading") : __("Mark {0}", [next]);
+	frm.page.set_primary_action(label, () => {
 		if (next === "Completed" && !frm.doc.custom_pod_received) {
 			frappe.msgprint({
 				title: __("POD Required"),
@@ -505,10 +510,10 @@ function add_status_buttons(frm) {
 			return;
 		}
 
-		const advance = () =>
+		const advance = (remainder_plan) =>
 			frappe.call({
 				method: "thameen_erp.overrides.delivery_trip.set_trip_status",
-				args: { trip: frm.doc.name, status: next },
+				args: { trip: frm.doc.name, status: next, remainder_plan: remainder_plan || undefined },
 				freeze: true,
 				freeze_message: __("Updating trip…"),
 				callback: () => {
@@ -535,12 +540,129 @@ function add_status_buttons(frm) {
 			return;
 		}
 
+		if (next === "Delivered") {
+			// An inbound (Supplier → Own Warehouse) trip: one choice for the
+			// FULL received quantity — keep it loaded on the vehicle, or
+			// unload it into the target warehouse now. Always asked, not
+			// just on a shortfall — see confirm_inbound_unload.
+			if (frm.doc.custom_destination_type === "Own Warehouse") {
+				confirm_inbound_unload(frm, advance);
+				return;
+			}
+
+			// A customer trip with any row short of its own Planned Qty: ask
+			// what happens to that gap, per item, before actually marking
+			// Delivered. A trip with no shortfall at all never sees this —
+			// the default, Keep in Vehicle, is exactly what already happened
+			// silently before this choice existed.
+			const leftover_rows = (frm.doc.custom_trip_items || []).filter(
+				(r) => flt(r.qty) - flt(r.delivered_qty) > PK_TOL
+			);
+			if (leftover_rows.length) {
+				confirm_remainder(leftover_rows, advance);
+				return;
+			}
+		}
+
 		if (STAGE_HINT[next]) {
 			frappe.confirm(STAGE_HINT[next] + "<br><br>" + __("Continue?"), advance);
 		} else {
 			advance();
 		}
 	});
+}
+
+// A customer trip's leftover: rows where Delivered Qty came in short of
+// Planned Qty. Per item, "Keep in Vehicle" (nothing moves — today's own
+// silent default) or "Unload to Main Warehouse" (a Material Transfer back
+// to this trip's own loading warehouse, raised server-side right after
+// Delivered is confirmed — see unload_remainder_to_warehouse). Bagged
+// cement is typically unloaded back to the warehouse; bulk cement
+// typically stays loaded for the next job — but it is the dispatcher's
+// own call per item, not something the system decides from the item.
+function confirm_remainder(leftover_rows, advance) {
+	const rows_html = leftover_rows
+		.map((r) => {
+			const gap = flt(r.qty) - flt(r.delivered_qty);
+			const choice = r.custom_remainder_action || "Keep in Vehicle";
+			return `<tr>
+				<td>${frappe.utils.escape_html(r.item_name || r.item_code)}</td>
+				<td class="text-right">${format_number(gap)} ${frappe.utils.escape_html(r.uom || "")}</td>
+				<td>
+					<select class="form-control input-xs remainder-choice" data-row="${r.name}">
+						<option value="Keep in Vehicle" ${choice === "Keep in Vehicle" ? "selected" : ""}>${__("Keep in Vehicle")}</option>
+						<option value="Unload to Main Warehouse" ${choice === "Unload to Main Warehouse" ? "selected" : ""}>${__("Unload to Main Warehouse")}</option>
+					</select>
+				</td>
+			</tr>`;
+		})
+		.join("");
+
+	const dialog = new frappe.ui.Dialog({
+		title: __("Undelivered Remainder"),
+		fields: [
+			{
+				fieldtype: "HTML",
+				options:
+					`<p>${__(
+						"These rows are short of their Planned Qty. Choose what happens to the gap on each — bagged cement is typically unloaded back to the warehouse, bulk cement typically stays on the truck."
+					)}</p>` +
+					`<table class="table table-bordered small">
+						<thead><tr><th>${__("Item")}</th><th class="text-right">${__("Remaining Qty")}</th><th>${__("Action")}</th></tr></thead>
+						<tbody>${rows_html}</tbody>
+					</table>`,
+			},
+		],
+		primary_action_label: __("Mark Delivered"),
+		primary_action() {
+			const plan = {};
+			dialog.$wrapper.find(".remainder-choice").each(function () {
+				plan[$(this).data("row")] = $(this).val();
+			});
+			dialog.hide();
+			advance(plan);
+		},
+	});
+	dialog.show();
+}
+
+// An inbound (Supplier → Own Warehouse) trip's full received quantity —
+// one choice for the whole load, not per item, since the truck as a whole
+// either tips into the yard now or carries on loaded for its next job.
+// Reuses the same custom_remainder_action field the shortfall dialog above
+// writes, just applied to every row with the same value, so
+// unload_to_warehouse only ever has to read one thing either way.
+function confirm_inbound_unload(frm, advance) {
+	const target = frm.doc.custom_target_warehouse || __("the target warehouse");
+	const dialog = new frappe.ui.Dialog({
+		title: __("Received Load"),
+		fields: [
+			{
+				fieldtype: "HTML",
+				options: `<p>${__(
+					"This trip's full received quantity — unload it into {0} now, or keep it loaded on the vehicle for its next job?",
+					[frappe.utils.escape_html(target)]
+				)}</p>`,
+			},
+		],
+		primary_action_label: __("Unload to Main Warehouse"),
+		primary_action() {
+			dialog.hide();
+			advance(inbound_plan(frm, "Unload to Main Warehouse"));
+		},
+		secondary_action_label: __("Keep in Vehicle"),
+		secondary_action() {
+			dialog.hide();
+			advance(inbound_plan(frm, "Keep in Vehicle"));
+		},
+	});
+	dialog.show();
+}
+
+function inbound_plan(frm, action) {
+	const plan = {};
+	(frm.doc.custom_trip_items || []).forEach((row) => (plan[row.name] = action));
+	return plan;
 }
 
 // Loading pulls from two places at once — whatever is already sitting in the

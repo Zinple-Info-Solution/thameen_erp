@@ -1,8 +1,21 @@
-"""Every purchase line that expects a supplier credit note, and where it stands."""
+"""Every purchase line that expects a supplier credit note, and where it
+stands — by supplier, Purchase Order and invoice, so this doubles as the
+operational list of what to request back from each supplier.
+
+"Rebate Due" (this invoice's own rate vs. Expected Net Price) is the amount
+actually owed and the one a Supplier Credit Note is raised against.
+"Expected Rebate" is the same formula fixed to the Purchase Order's own
+rate instead — normally the same number, but not always: a Price Flag
+marks any row where the invoice was billed at a different rate than its
+Purchase Order, which is exactly when the two diverge and are worth a
+second look before the credit note is requested.
+"""
 
 import frappe
 from frappe import _
 from frappe.utils import date_diff, flt, nowdate
+
+PRICE_TOLERANCE = 0.01
 
 
 def execute(filters=None):
@@ -13,13 +26,17 @@ def execute(filters=None):
 		f"""
 		select pi.name as purchase_invoice, pi.supplier, pi.posting_date,
 		       pii.name as pi_item, pii.item_code, pii.qty, pii.rate,
+		       pii.custom_agreed_net_price as expected_net_price,
 		       pii.custom_expected_discount_amount as expected,
 		       pii.custom_credit_note_received as received,
-		       pii.custom_credit_note_status as status
+		       pii.custom_credit_note_status as status,
+		       poi.parent as purchase_order, poi.rate as po_rate,
+		       poi.custom_expected_discount_amount as po_expected_rebate
 		from `tabPurchase Invoice Item` pii
 		inner join `tabPurchase Invoice` pi on pi.name = pii.parent
+		left join `tabPurchase Order Item` poi on poi.name = pii.po_detail
 		where {conditions}
-		order by pi.posting_date
+		order by pi.supplier, poi.parent, pi.posting_date
 		""",
 		values,
 		as_dict=True,
@@ -33,6 +50,8 @@ def execute(filters=None):
 		expected = flt(row.expected)
 		received = flt(row.received)
 		variance = received - expected
+		po_rate = flt(row.po_rate) if row.purchase_order else None
+		price_flag = bool(po_rate is not None and abs(flt(row.rate) - po_rate) > PRICE_TOLERANCE)
 		data.append(
 			{
 				**row,
@@ -42,6 +61,8 @@ def execute(filters=None):
 				"pending": max(expected - received, 0),
 				"age": date_diff(today, row.posting_date),
 				"credit_notes": ", ".join(credit_notes.get(row.pi_item, [])),
+				"po_expected_rebate": flt(row.po_expected_rebate) if row.purchase_order else None,
+				"price_flag": _("Review") if price_flag else "",
 			}
 		)
 
@@ -106,16 +127,22 @@ def get_chart(data):
 
 def get_columns():
 	return [
-		{"label": _("Purchase Invoice"), "fieldname": "purchase_invoice", "fieldtype": "Link", "options": "Purchase Invoice", "width": 160},
 		{"label": _("Supplier"), "fieldname": "supplier", "fieldtype": "Link", "options": "Supplier", "width": 150},
+		{"label": _("Purchase Order"), "fieldname": "purchase_order", "fieldtype": "Link", "options": "Purchase Order", "width": 140},
+		{"label": _("Purchase Invoice"), "fieldname": "purchase_invoice", "fieldtype": "Link", "options": "Purchase Invoice", "width": 140},
 		{"label": _("Date"), "fieldname": "posting_date", "fieldtype": "Date", "width": 100},
 		{"label": _("Age (Days)"), "fieldname": "age", "fieldtype": "Int", "width": 90},
 		{"label": _("Item"), "fieldname": "item_code", "fieldtype": "Link", "options": "Item", "width": 130},
 		{"label": _("Qty"), "fieldname": "qty", "fieldtype": "Float", "width": 80},
-		{"label": _("Expected"), "fieldname": "expected", "fieldtype": "Currency", "width": 120},
+		{"label": _("Expected Net Price"), "fieldname": "expected_net_price", "fieldtype": "Currency", "width": 120},
+		{"label": _("Invoice Rate"), "fieldname": "rate", "fieldtype": "Currency", "width": 110},
+		{"label": _("PO Rate"), "fieldname": "po_rate", "fieldtype": "Currency", "width": 110},
+		{"label": _("Price Flag"), "fieldname": "price_flag", "fieldtype": "Data", "width": 90},
+		{"label": _("Expected Rebate (PO)"), "fieldname": "po_expected_rebate", "fieldtype": "Currency", "width": 140},
+		{"label": _("Rebate Due"), "fieldname": "expected", "fieldtype": "Currency", "width": 120},
 		{"label": _("Received"), "fieldname": "received", "fieldtype": "Currency", "width": 120},
 		{"label": _("Variance"), "fieldname": "variance", "fieldtype": "Currency", "width": 120},
-		{"label": _("Pending"), "fieldname": "pending", "fieldtype": "Currency", "width": 120},
+		{"label": _("Outstanding"), "fieldname": "pending", "fieldtype": "Currency", "width": 120},
 		{"label": _("Status"), "fieldname": "status", "fieldtype": "Data", "width": 150},
 		{"label": _("Credit Notes"), "fieldname": "credit_notes", "fieldtype": "Data", "width": 180},
 	]

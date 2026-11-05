@@ -374,9 +374,19 @@ function add_delivery_trips_button_unless_vehicle_warehouse(frm) {
 const RECEIPT_OTHER_CREATE_BUTTONS = ["Debit Note", "Landed Cost Voucher", "Make Stock Entry", "Retention Stock Entry"];
 
 function hide_other_receipt_create_buttons(frm) {
+	if (frappe.user_roles.includes("System Manager") || frappe.session.user === "Administrator") return;
+
+	// Fleet & Trip Manager only ever plan pickups — Trip Manager's own
+	// doctype permission grants them "create" on Purchase Receipt itself
+	// (see purchase_order.js for the matching Purchase Order Create-menu
+	// restriction), so without this a receipt they can create or open
+	// would still offer "Create > Purchase Invoice", the same bypass this
+	// role is meant to be kept out of.
+	const hide_invoice = frappe.user.has_role("Fleet Manager") || frappe.user.has_role("Trip Manager");
+	const labels = hide_invoice ? [...RECEIPT_OTHER_CREATE_BUTTONS, "Purchase Invoice"] : RECEIPT_OTHER_CREATE_BUTTONS;
 	const remove = () => {
 		if (!frm.page.inner_toolbar) return;
-		RECEIPT_OTHER_CREATE_BUTTONS.forEach((label) => {
+		labels.forEach((label) => {
 			frm.page.inner_toolbar.find(`[data-label="${encodeURIComponent(__(label))}"]`).remove();
 		});
 		frm.page.inner_toolbar.find(".inner-group-button").each(function () {

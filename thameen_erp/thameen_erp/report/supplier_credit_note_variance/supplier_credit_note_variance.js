@@ -16,6 +16,9 @@ frappe.query_reports["Supplier Credit Note Variance"] = {
 		if (column.fieldname === "age" && data && data.age > 45 && data.pending > 0) {
 			value = `<span style="color:var(--text-danger);font-weight:600">${value}</span>`;
 		}
+		if (column.fieldname === "price_flag" && data && data.price_flag) {
+			value = `<span style="color:var(--text-danger);font-weight:600">${value}</span>`;
+		}
 		return value;
 	},
 };

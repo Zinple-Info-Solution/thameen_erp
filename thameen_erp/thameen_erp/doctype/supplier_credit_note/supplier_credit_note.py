@@ -30,14 +30,17 @@ class SupplierCreditNote(Document):
 			frappe.throw(_("Purchase Invoice {0} must be submitted.").format(self.purchase_invoice))
 
 	def fetch_expected_amounts(self):
-		"""Expected amount always comes from the invoice, never typed by hand."""
+		"""Expected amount always comes from the invoice, never typed by hand.
+		`flat_rebate_amount` is the OTHER, unrelated rebate mechanism's own
+		amount -- settled independently of Rebate Due/Actual via
+		`flat_rebate_received`/`flat_rebate_outstanding` below."""
 		for row in self.items:
 			if not row.purchase_invoice_item:
 				continue
 			pi_row = frappe.db.get_value(
 				"Purchase Invoice Item",
 				row.purchase_invoice_item,
-				["item_code", "custom_expected_discount_amount", "parent"],
+				["item_code", "custom_expected_discount_amount", "custom_rebate_amount", "parent"],
 				as_dict=True,
 			)
 			if not pi_row:
@@ -52,6 +55,7 @@ class SupplierCreditNote(Document):
 				)
 			row.item_code = pi_row.item_code
 			row.expected_amount = flt(pi_row.custom_expected_discount_amount)
+			row.flat_rebate_amount = flt(pi_row.custom_rebate_amount)
 
 	def calculate_variance(self):
 		for row in self.items:
@@ -60,6 +64,12 @@ class SupplierCreditNote(Document):
 			row.variance = cumulative - flt(row.expected_amount)
 			row.row_status = classify(flt(row.expected_amount), cumulative)
 
+			already_flat = self.get_previously_received(
+				row.purchase_invoice_item, fieldname="flat_rebate_received"
+			)
+			cumulative_flat = already_flat + flt(row.flat_rebate_received)
+			row.flat_rebate_outstanding = max(flt(row.flat_rebate_amount) - cumulative_flat, 0)
+
 		self.total_expected = sum(flt(r.expected_amount) for r in self.items)
 		self.total_actual = sum(flt(r.actual_amount) for r in self.items)
 		self.total_variance = sum(flt(r.variance) for r in self.items)
@@ -67,15 +77,16 @@ class SupplierCreditNote(Document):
 			(self.total_variance / self.total_expected * 100) if self.total_expected else 0
 		)
 
-	def get_previously_received(self, pi_item):
-		"""Sum of actual amounts on other submitted credit notes for the same PI line."""
+	def get_previously_received(self, pi_item, fieldname="actual_amount"):
+		"""Sum of actual (or flat_rebate_received) amounts on other submitted
+		credit notes for the same PI line."""
 		if not pi_item:
 			return 0
 		return (
 			flt(
 				frappe.db.sql(
-					"""
-					select sum(scni.actual_amount)
+					f"""
+					select sum(scni.{fieldname})
 					from `tabSupplier Credit Note Item` scni
 					inner join `tabSupplier Credit Note` scn on scn.name = scni.parent
 					where scni.purchase_invoice_item = %(pi_item)s
@@ -137,6 +148,13 @@ class SupplierCreditNote(Document):
 			if not cancelling:
 				received += flt(row.actual_amount)
 			expected = flt(row.expected_amount)
+
+			flat_received = self.get_previously_received(
+				row.purchase_invoice_item, fieldname="flat_rebate_received"
+			)
+			if not cancelling:
+				flat_received += flt(row.flat_rebate_received)
+
 			frappe.db.set_value(
 				"Purchase Invoice Item",
 				row.purchase_invoice_item,
@@ -145,13 +163,24 @@ class SupplierCreditNote(Document):
 					"custom_credit_note_status": "Cancelled"
 					if (cancelling and not received)
 					else classify(expected, received),
+					"custom_flat_rebate_received": flat_received,
 				},
 				update_modified=False,
 			)
 
 	def make_debit_note(self):
-		"""Return Purchase Invoice for the actual credited amount."""
+		"""Return Purchase Invoice for the credited Rebate Amount (the flat
+		'Add Rebate' mechanism -- not Rebate Due/Expected Net Price, which
+		this same Credit Note tracks and settles separately but does not
+		raise a debit note for), carrying over its share of the original
+		invoice's VAT -- a plain rate/qty return has no tax rows of its
+		own, so without this the input VAT already claimed on the credited
+		amount is never reversed."""
 		if self.debit_note:
+			return
+
+		rows_to_credit = [r for r in self.items if flt(r.flat_rebate_received) > 0]
+		if not rows_to_credit:
 			return
 
 		pi = frappe.get_doc("Purchase Invoice", self.purchase_invoice)
@@ -168,11 +197,11 @@ class SupplierCreditNote(Document):
 		dn.bill_no = self.credit_note_number
 		dn.remarks = _("Supplier Credit Note {0}").format(self.name)
 
-		for row in self.items:
+		for row in rows_to_credit:
 			source = frappe.db.get_value(
 				"Purchase Invoice Item",
 				row.purchase_invoice_item,
-				["item_code", "uom", "conversion_factor", "expense_account", "cost_center"],
+				["item_code", "uom", "conversion_factor", "expense_account", "cost_center", "item_tax_template"],
 				as_dict=True,
 			)
 			dn.append(
@@ -180,12 +209,33 @@ class SupplierCreditNote(Document):
 				{
 					"item_code": row.item_code,
 					"qty": -1,
-					"rate": flt(row.actual_amount),
+					"rate": flt(row.flat_rebate_received),
 					"uom": source.uom,
 					"conversion_factor": source.conversion_factor or 1,
 					"expense_account": source.expense_account,
 					"cost_center": source.cost_center,
+					"item_tax_template": source.item_tax_template,
 					"purchase_invoice_item": row.purchase_invoice_item,
+				},
+			)
+
+		# Percentage-based charges (the normal VAT setup) recompute
+		# themselves from this return's own net total on save. A flat
+		# "Actual" charge has nothing to recompute from, so it is scaled by
+		# how much of the original invoice's value this note reverses.
+		total_flat_received = sum(flt(r.flat_rebate_received) for r in rows_to_credit)
+		ratio = (total_flat_received / flt(pi.net_total)) if pi.net_total else 0
+		for t in pi.taxes:
+			dn.append(
+				"taxes",
+				{
+					"charge_type": t.charge_type,
+					"account_head": t.account_head,
+					"description": t.description,
+					"rate": t.rate,
+					"cost_center": t.cost_center,
+					"included_in_print_rate": t.included_in_print_rate,
+					"tax_amount": flt(t.tax_amount) * ratio if t.charge_type == "Actual" else 0,
 				},
 			)
 

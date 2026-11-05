@@ -367,8 +367,20 @@ def receive_onto_vehicle(trip_doc):
 	"""Purchase Receipt supplier → vehicle warehouse for every trip row.
 
 	Called by ThameenDeliveryTrip.load_vehicle when Supply Source is Direct
-	from Supplier. Idempotent: a second call finds the existing receipt.
+	from Supplier. Idempotent: a second call finds the existing receipt --
+	either this trip's own (the `custom_delivery_trip` match below, for a
+	trip that raised its own receipt here), or one already stamped onto it
+	by someone else (`create_trip_after_pickup`'s follow-on trip, whose
+	receipt's `custom_delivery_trip` points at the PICKUP trip it actually
+	came from, not this one -- the follow-on trip is already loaded with
+	exactly what that receipt put on the truck; there is nothing left for
+	it to receive, and trying to raise a second one off the same
+	now-fully-received Purchase Order fails with nothing left to match).
 	"""
+	already = trip_doc.get("custom_purchase_receipt")
+	if already and frappe.db.get_value("Purchase Receipt", already, "docstatus") == 1:
+		return already
+
 	rows = [row for row in (trip_doc.get("custom_trip_items") or []) if flt(row.qty) > 0]
 	if not rows:
 		return None

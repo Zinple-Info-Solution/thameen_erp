@@ -12,18 +12,21 @@
  "idx": 0,
  "is_standard": "Yes",
  "letter_head": null,
- "modified": "2026-09-15 12:23:25.278827",
+ "modified": "2026-10-30 00:00:00.000000",
  "modified_by": "Administrator",
  "module": "Thameen ERP",
  "name": "Rebate Report",
  "owner": "Administrator",
  "prepared_report": 0,
- "ref_doctype": "Rebate",
+ "ref_doctype": "Supplier Credit Note",
  "report_name": "Rebate Report",
  "report_type": "Script Report",
  "roles": [
   {
    "role": "System Manager"
+  },
+  {
+   "role": "Finance Approver"
   }
  ],
  "snapshot_report": 0,

@@ -10,6 +10,7 @@ import frappe
 BYPASS_ROLES = {
 	"System Manager",
 	"Fleet Manager",
+	"Trip Manager",
 	"Operation Manager",
 	"Sales Manager",
 	"Accounts Manager",

@@ -19,9 +19,6 @@
  "report_type": "Script Report",
  "roles": [
   {
-   "role": "Fleet Manager"
-  },
-  {
    "role": "Operation Manager"
   },
   {
@@ -29,6 +26,9 @@
   },
   {
    "role": "System Manager"
+  },
+  {
+   "role": "Finance Approver"
   }
  ]
 }

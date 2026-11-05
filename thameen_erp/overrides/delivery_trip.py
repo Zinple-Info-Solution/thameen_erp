@@ -1142,9 +1142,18 @@ class ThameenDeliveryTrip(DeliveryTrip):
 		)
 
 	def unload_to_warehouse(self):
-		"""Inbound trip (Supplier → My Warehouse): move the cement off the
-		truck into the target warehouse. Delivered Qty, if entered, is what
-		actually arrived; otherwise the planned qty."""
+		"""Inbound trip (Supplier → My Warehouse): Delivered Qty, if
+		entered, is what actually arrived; otherwise the planned qty --
+		set either way, since it is what the supplier handed over,
+		independent of where it ends up next.
+
+		What happens to that quantity depends on the dispatcher's choice
+		at Mark Delivered (`custom_remainder_action`, applied to every row
+		alike -- see `confirm_inbound_unload` in delivery_trip.js): "Unload
+		to Main Warehouse" (the default -- same as every inbound trip
+		before this choice existed, so a row left blank still unloads) or
+		"Keep in Vehicle" (nothing moves for that row -- the load stays on
+		the truck for its next job)."""
 		target = self.get("custom_target_warehouse")
 		if not target:
 			frappe.throw(_("Set the Target Warehouse on this inbound trip before marking it Delivered."))
@@ -1152,14 +1161,32 @@ class ThameenDeliveryTrip(DeliveryTrip):
 		if not vehicle_wh:
 			frappe.throw(_("Vehicle {0} has no vehicle warehouse.").format(self.get("vehicle")))
 
+		all_rows = [row for row in (self.get("custom_trip_items") or []) if flt(row.delivered_qty) or flt(row.qty)]
+		if not all_rows:
+			return
+
+		for row in all_rows:
+			if not flt(row.delivered_qty):
+				frappe.db.set_value("Delivery Trip Item", row.name, "delivered_qty", flt(row.qty), update_modified=False)
+				row.delivered_qty = row.qty
+
+		self.db_set("custom_delivered_qty", sum(flt(row.delivered_qty) for row in all_rows), update_modified=False)
+
 		if frappe.db.exists(
 			"Stock Entry",
 			{"custom_delivery_trip": self.name, "custom_vehicle_load_type": "Inbound Unload", "docstatus": 1},
 		):
 			return
 
-		rows = [row for row in (self.get("custom_trip_items") or []) if flt(row.delivered_qty) or flt(row.qty)]
-		if not rows:
+		move_rows = [row for row in all_rows if row.get("custom_remainder_action") != "Keep in Vehicle"]
+		if not move_rows:
+			frappe.msgprint(
+				_("{0} kept loaded on {1} — nothing unloaded into {2}.").format(
+					flt(sum(flt(row.delivered_qty) for row in all_rows), 2), self.vehicle, target
+				),
+				indicator="blue",
+				alert=True,
+			)
 			return
 
 		se = frappe.new_doc("Stock Entry")
@@ -1170,8 +1197,8 @@ class ThameenDeliveryTrip(DeliveryTrip):
 		se.custom_vehicle_load_type = "Inbound Unload"
 		se.remarks = _("Inbound trip {0}: {1} → {2}").format(self.name, self.vehicle, target)
 		total = 0.0
-		for row in rows:
-			qty = flt(row.delivered_qty) or flt(row.qty)
+		for row in move_rows:
+			qty = flt(row.delivered_qty)
 			total += qty * (flt(row.conversion_factor) or 1)
 			se.append(
 				"items",
@@ -1185,15 +1212,85 @@ class ThameenDeliveryTrip(DeliveryTrip):
 					"cost_center": self.get("custom_cost_center"),
 				},
 			)
-			if not flt(row.delivered_qty):
-				frappe.db.set_value("Delivery Trip Item", row.name, "delivered_qty", flt(row.qty), update_modified=False)
 		se.flags.ignore_permissions = True
 		se.insert()
 		se.submit()
 
-		self.db_set("custom_delivered_qty", sum(flt(r.delivered_qty) or flt(r.qty) for r in rows), update_modified=False)
 		frappe.msgprint(
 			_("{0} unloaded from {1} into {2} via {3}").format(flt(total, 2), self.vehicle, target, get_link_to_form("Stock Entry", se.name)),
+			indicator="green",
+			alert=True,
+		)
+		return se.name
+
+	def unload_remainder_to_warehouse(self):
+		"""A customer trip's leftover: for any row where Delivered Qty came
+		in short of Planned Qty, and the dispatcher marked that row "Unload
+		to Main Warehouse" (`custom_remainder_action`), move the gap off the
+		vehicle and back into the warehouse this trip was loaded from
+		(`custom_loading_warehouse`) — the default, "Keep in Vehicle", is
+		exactly what already happened before this existed: the gap just
+		stayed on the truck untouched, so a row left on that default raises
+		nothing here.
+
+		Runs after `create_delivery_notes`, which is what actually sets
+		Delivered Qty when it was never entered by hand — so the gap this
+		reads is always the real one, not a stale value from before
+		delivery."""
+		target = self.get("custom_loading_warehouse")
+		if not target:
+			return
+
+		rows = [
+			row
+			for row in (self.get("custom_trip_items") or [])
+			if row.get("custom_remainder_action") == "Unload to Main Warehouse"
+			and flt(row.qty) - flt(row.delivered_qty) > QTY_TOLERANCE
+		]
+		if not rows:
+			return
+
+		if frappe.db.exists(
+			"Stock Entry",
+			{"custom_delivery_trip": self.name, "custom_vehicle_load_type": "Remainder Unload", "docstatus": 1},
+		):
+			return
+
+		vehicle_wh = frappe.db.get_value("Vehicle", self.vehicle, "custom_vehicle_warehouse") if self.get("vehicle") else None
+		if not vehicle_wh:
+			return
+
+		se = frappe.new_doc("Stock Entry")
+		se.stock_entry_type = "Material Transfer"
+		se.company = self.company
+		se.custom_delivery_trip = self.name
+		se.custom_vehicle = self.vehicle
+		se.custom_vehicle_load_type = "Remainder Unload"
+		se.remarks = _("Trip {0}: undelivered remainder, {1} → {2}").format(self.name, self.vehicle, target)
+		total = 0.0
+		for row in rows:
+			qty = flt(row.qty) - flt(row.delivered_qty)
+			total += qty * (flt(row.conversion_factor) or 1)
+			se.append(
+				"items",
+				{
+					"item_code": row.item_code,
+					"qty": qty,
+					"uom": row.uom or row.stock_uom,
+					"conversion_factor": flt(row.conversion_factor) or 1,
+					"s_warehouse": vehicle_wh,
+					"t_warehouse": target,
+					"cost_center": self.get("custom_cost_center"),
+				},
+			)
+		se.flags.ignore_permissions = True
+		se.insert()
+		se.submit()
+
+		frappe.msgprint(
+			_("{0} undelivered remainder unloaded from {1} into {2} via {3}").format(
+				flt(total, 2), self.vehicle, target, get_link_to_form("Stock Entry", se.name)
+			),
 			indicator="green",
 			alert=True,
 		)
@@ -1474,11 +1571,21 @@ def close_sales_order_if_complete(sales_order):
 
 
 @frappe.whitelist()
-def set_trip_status(trip, status):
+def set_trip_status(trip, status, remainder_plan=None):
 	"""Advance a submitted trip.
 
 	`status` is a standard read-only field, so it is written with `db_set`.
 	Saving the document instead would raise UpdateAfterSubmitError.
+
+	`remainder_plan` (only meaningful on the "Delivered" step): {Delivery
+	Trip Item row name: "Keep in Vehicle" | "Unload to Main Warehouse"},
+	the dispatcher's choice from the dialog shown before this call --
+	per item on a customer trip short of its own Planned Qty, or the same
+	single choice applied to every row on an inbound trip's full received
+	quantity (see `confirm_remainder` / `confirm_inbound_unload` in
+	delivery_trip.js). Written onto the rows before `create_delivery_notes`
+	/ `unload_to_warehouse` act on them, so what they read is always the
+	dispatcher's actual choice, not a stale value from before delivery.
 	"""
 	doc = frappe.get_doc("Delivery Trip", trip)
 	frappe.has_permission("Delivery Trip", "write", doc=doc, throw=True)
@@ -1508,10 +1615,33 @@ def set_trip_status(trip, status):
 				  "(Deliver to Customer / Deliver to Own Warehouse)."),
 				title=_("Destination Not Decided"),
 			)
+		if remainder_plan:
+			plan = frappe.parse_json(remainder_plan) if isinstance(remainder_plan, str) else remainder_plan
+			for row in doc.get("custom_trip_items") or []:
+				action = plan.get(row.name)
+				if action in ("Keep in Vehicle", "Unload to Main Warehouse"):
+					frappe.db.set_value(
+						"Delivery Trip Item", row.name, "custom_remainder_action", action, update_modified=False
+					)
+			doc.reload()
+		elif inbound:
+			# No explicit choice communicated for this inbound trip -- default
+			# to what every inbound trip did before this choice existed:
+			# everything unloads. Written explicitly rather than left as-is,
+			# because custom_remainder_action's own schema default ("Keep in
+			# Vehicle") belongs to the OUTBOUND shortfall flow below and must
+			# not leak into this one just because the field was never touched.
+			for row in doc.get("custom_trip_items") or []:
+				frappe.db.set_value(
+					"Delivery Trip Item", row.name, "custom_remainder_action", "Unload to Main Warehouse", update_modified=False
+				)
+			doc.reload()
+
 		if inbound:
 			doc.unload_to_warehouse()
 		else:
 			doc.create_delivery_notes()
+			doc.unload_remainder_to_warehouse()
 	elif status == "Completed":
 		# An inbound trip's proof is the Stock Entry into the yard, not a
 		# customer signature.

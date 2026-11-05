@@ -18,12 +18,56 @@ frappe.ui.form.on("Purchase Order", {
 		// trip-raises-its-own-PO flow above) can still get its own,
 		// separate pickup trip(s). create_pickup_trips warns rather than
 		// silently overwriting an existing link.
-		if (frm.doc.docstatus === 1) {
+		//
+		// Restricted to Fleet Manager / Trip Manager — planning which
+		// vehicle collects what is their call, not Finance's or
+		// Purchasing's, even though both can see this Purchase Order.
+		const can_send_vehicle = frappe.user.has_role("Fleet Manager") || frappe.user.has_role("Trip Manager");
+		if (frm.doc.docstatus === 1 && can_send_vehicle) {
 			frm.add_custom_button(__("Send Vehicle to Collect"), () => open_pickup_trip_dialog(frm))
 				.addClass("btn-primary");
 		}
+		hide_restricted_po_create_buttons(frm);
 	},
 });
+
+// Core adds "Purchase Receipt" / "Purchase Invoice" to the Create menu
+// unconditionally — it never checks the viewer's actual create permission
+// on either doctype, so the option shows even to a role that could never
+// save the document it opens. Purchase Manager raises invoices off a PO
+// but receiving stock is Warehouse's/Stock's job, not theirs — only
+// "Purchase Receipt" is hidden for them. Fleet & Trip Manager only ever
+// plan pickups (see "Send Vehicle to Collect" above); creating either
+// document from here is not their call, so both are hidden.
+//
+// Core's own controller registers refresh the old (cscript) way, run
+// AFTER every new-style `frappe.ui.form.on` handler (ours) — so on the
+// very first pass here the buttons do not exist yet to remove. Repeating
+// the removal a few times after a short delay catches them once core
+// actually adds them.
+function hide_restricted_po_create_buttons(frm) {
+	if (frappe.user_roles.includes("System Manager") || frappe.session.user === "Administrator") return;
+
+	const hide = new Set();
+	if (frappe.user.has_role("Purchase Manager")) hide.add("Purchase Receipt");
+	if (frappe.user.has_role("Fleet Manager") || frappe.user.has_role("Trip Manager")) {
+		hide.add("Purchase Receipt");
+		hide.add("Purchase Invoice");
+	}
+	if (!hide.size) return;
+
+	const remove = () => {
+		if (!frm.page.inner_toolbar) return;
+		hide.forEach((label) => {
+			frm.page.inner_toolbar.find(`[data-label="${encodeURIComponent(__(label))}"]`).remove();
+		});
+		frm.page.inner_toolbar.find(".inner-group-button").each(function () {
+			if (!$(this).find(".dropdown-item").length) $(this).remove();
+		});
+	};
+	remove();
+	[300, 800, 1500].forEach((ms) => setTimeout(remove, ms));
+}
 
 const PK_TOL = 0.001;
 
@@ -88,6 +132,12 @@ function draw_pickup_plan(dialog, plan, pending, vehicle_opts, driver_opts) {
 	const taken_vehicles = (except_i) => new Set(plan.map((r, i) => (i === except_i ? null : r.vehicle)).filter(Boolean));
 	const taken_drivers = (except_i) => new Set(plan.map((r, i) => (i === except_i ? null : r.driver)).filter(Boolean));
 
+	// Every truck offered here is already empty — pending_pickup_qty only
+	// ever sends empty vehicles through in the first place — but the label
+	// said nothing about that, same "name · cap" style as any busy truck
+	// elsewhere in the app. Spelling out "free" here matches how the other
+	// planner (trip_planner.js, used from Sales Order / Purchase Receipt)
+	// already marks an empty truck in its own dropdown.
 	const vehicle_select = (value, i) => {
 		const taken = taken_vehicles(i);
 		return [`<option value="">${__("— choose —")}</option>`]
@@ -95,7 +145,9 @@ function draw_pickup_plan(dialog, plan, pending, vehicle_opts, driver_opts) {
 				vehicle_opts
 					.filter((v) => v.name === value || !taken.has(v.name))
 					.map((v) => {
-						const label = v.capacity ? `${v.name} (${format_number(v.capacity)})` : v.name;
+						const label = v.capacity
+							? `${v.name} · ${__("free")} · ${__("cap")} ${format_number(v.capacity)}`
+							: `${v.name} · ${__("free")}`;
 						return `<option value="${frappe.utils.escape_html(v.name)}" ${v.name === value ? "selected" : ""}>${frappe.utils.escape_html(label)}</option>`;
 					})
 			)

@@ -211,6 +211,7 @@ def get_custom_fields() -> dict:
 				"fieldname": "custom_capacity",
 				"label": "Capacity",
 				"fieldtype": "Float",
+				"in_list_view": 1,
 				"insert_after": "custom_vehicle_type",
 			},
 			{
@@ -246,7 +247,7 @@ def get_custom_fields() -> dict:
 				"fieldtype": "Float",
 				"read_only": 1,
 				"no_copy": 1,
-				"in_list_view": 1,
+				"in_list_view": 0,
 				"insert_after": "custom_on_truck_qty",
 				"description": "Capacity less the larger of Committed Qty and On Truck Qty. Recounted, never incremented.",
 			},
@@ -907,29 +908,207 @@ def get_custom_fields() -> dict:
 		# ------------------------------------------------------------------
 		"Purchase Order Item": [
 			{
-				"fieldname": "custom_expected_discount_amount",
-				"label": "Expected Discount (Credit Note)",
+				# The price per unit agreed with the supplier, rebate included
+				# — entered by hand when the rebate is agreed. Expected Rebate
+				# below is computed from this, not the other way round.
+				"fieldname": "custom_agreed_net_price",
+				"label": "Expected Net Price",
 				"fieldtype": "Currency",
+				"read_only": 0,
 				"insert_after": "rate",
 			},
 			{
-				"fieldname": "custom_agreed_net_price",
-				"label": "Agreed Net Price",
+				# Computed: (this line's own rate - Expected Net Price) x
+				# ordered qty — the rebate expected on this PO, fixed to the
+				# PO's own rate even if the real invoice later bills
+				# differently (thameen_erp.overrides.purchase.
+				# _compute_rebate_from_agreed_price).
+				"fieldname": "custom_expected_discount_amount",
+				"label": "Expected Rebate",
+				"fieldtype": "Currency",
+				"read_only": 1,
+				"insert_after": "custom_agreed_net_price",
+			},
+			{
+				# Written back from the real Purchase Invoice once one is
+				# submitted against this line (see
+				# thameen_erp.overrides.purchase.write_back_actual_purchase_price)
+				# — Expected Net Price and this sit side by side for comparison.
+				"fieldname": "custom_actual_purchase_price",
+				"label": "Actual Purchase Price",
 				"fieldtype": "Currency",
 				"read_only": 1,
 				"insert_after": "custom_expected_discount_amount",
 			},
-		],
-		"Purchase Invoice Item": [
 			{
-				"fieldname": "custom_expected_discount_amount",
-				"label": "Expected Discount (Credit Note)",
+				# Mirrored from the Purchase Invoice line's own tracking
+				# (thameen_erp.overrides.purchase._sync_po_rebate_from_pi_row)
+				# — the rebate's status is visible from the PO itself, not
+				# only from the invoice it actually lives on.
+				"fieldname": "custom_credit_note_status",
+				"label": "Credit Note Status",
+				"fieldtype": "Select",
+				"options": CREDIT_NOTE_STATUS,
+				"default": "Not Applicable",
+				"read_only": 1,
+				"insert_after": "custom_actual_purchase_price",
+			},
+			{
+				"fieldname": "custom_credit_note_received",
+				"label": "Credit Note Received",
 				"fieldtype": "Currency",
+				"read_only": 1,
+				"insert_after": "custom_credit_note_status",
+			},
+			{
+				"fieldname": "custom_credit_note_outstanding",
+				"label": "Credit Note Outstanding",
+				"fieldtype": "Currency",
+				"read_only": 1,
+				"insert_after": "custom_credit_note_received",
+			},
+			# Supplier rebate — percentage comes from the Item master, the
+			# amount is derived in thameen_erp.overrides.purchase_invoice.
+			# A Purchase Order line is always the top of its own chain, so
+			# this is where the rebate is actually computed; a Receipt or
+			# Invoice line raised off it just inherits the already-rebated
+			# rate (see that module's docstring).
+			{
+				"fieldname": "custom_rebate_percentage",
+				"label": "Rebate %",
+				"fieldtype": "Float",
+				"fetch_from": "item_code.custom_rebate_percentage",
+				"fetch_if_empty": 1,
+				"in_list_view": 1,
+				"columns": 1,
+				"insert_after": "custom_credit_note_outstanding",
+			},
+			{
+				"fieldname": "custom_rebate_amount",
+				"label": "Rebate Amount",
+				"fieldtype": "Currency",
+				"read_only": 1,
+				"in_list_view": 1,
+				"columns": 1,
+				"insert_after": "custom_rebate_percentage",
+			},
+		],
+		"Purchase Receipt Item": [
+			{
+				# Carried across automatically from the Purchase Order line
+				# when a receipt is made off it (get_mapped_doc's own
+				# same-fieldname copy) — editable here too, for a receipt
+				# raised some other way.
+				"fieldname": "custom_agreed_net_price",
+				"label": "Expected Net Price",
+				"fieldtype": "Currency",
+				"read_only": 0,
 				"insert_after": "rate",
 			},
 			{
+				# Computed from Expected Net Price against this receipt's own
+				# rate, same formula as the Purchase Order
+				# (thameen_erp.overrides.purchase._compute_rebate_from_agreed_price).
+				"fieldname": "custom_expected_discount_amount",
+				"label": "Expected Rebate",
+				"fieldtype": "Currency",
+				"read_only": 1,
+				"insert_after": "custom_agreed_net_price",
+			},
+			{
+				# This receipt's own rate, mirrored under the same label the
+				# Purchase Order and Purchase Invoice both use — kept in sync
+				# in thameen_erp.overrides.purchase.validate_purchase_receipt.
+				"fieldname": "custom_actual_purchase_price",
+				"label": "Actual Purchase Price",
+				"fieldtype": "Currency",
+				"read_only": 1,
+				"insert_after": "custom_expected_discount_amount",
+			},
+			{
+				# Mirrored from the Purchase Invoice line's own tracking,
+				# same as the Purchase Order's own copy of these three
+				# (thameen_erp.overrides.purchase._sync_po_rebate_from_pi_row)
+				# — matched by `purchase_order_item`, not `po_detail`: that
+				# is this doctype's own name for the same PO line link.
+				"fieldname": "custom_credit_note_status",
+				"label": "Credit Note Status",
+				"fieldtype": "Select",
+				"options": CREDIT_NOTE_STATUS,
+				"default": "Not Applicable",
+				"read_only": 1,
+				"insert_after": "custom_actual_purchase_price",
+			},
+			{
+				"fieldname": "custom_credit_note_received",
+				"label": "Credit Note Received",
+				"fieldtype": "Currency",
+				"read_only": 1,
+				"insert_after": "custom_credit_note_status",
+			},
+			{
+				"fieldname": "custom_credit_note_outstanding",
+				"label": "Credit Note Outstanding",
+				"fieldtype": "Currency",
+				"read_only": 1,
+				"insert_after": "custom_credit_note_received",
+			},
+			# Supplier rebate — only actually applied to a line with no
+			# Purchase Order behind it (thameen_erp.overrides.
+			# purchase_invoice._raised_from_purchase_order); a line raised
+			# off a PO already carries that PO's own rate.
+			{
+				"fieldname": "custom_rebate_percentage",
+				"label": "Rebate %",
+				"fieldtype": "Float",
+				"fetch_from": "item_code.custom_rebate_percentage",
+				"fetch_if_empty": 1,
+				"in_list_view": 1,
+				"columns": 1,
+				"insert_after": "custom_credit_note_outstanding",
+			},
+			{
+				"fieldname": "custom_rebate_amount",
+				"label": "Rebate Amount",
+				"fieldtype": "Currency",
+				"read_only": 1,
+				"in_list_view": 1,
+				"columns": 1,
+				"insert_after": "custom_rebate_percentage",
+			},
+		],
+		"Purchase Invoice Item": [
+			{
+				# Carried across automatically from the Purchase Order line
+				# (get_mapped_doc's same-fieldname copy) — editable here too,
+				# for an invoice with no Purchase Order behind it.
 				"fieldname": "custom_agreed_net_price",
-				"label": "Agreed Net Price",
+				"label": "Expected Net Price",
+				"fieldtype": "Currency",
+				"read_only": 0,
+				"insert_after": "rate",
+			},
+			{
+				# Computed: (this invoice's own rate - Expected Net Price) x
+				# qty — the REAL rebate due, using the price actually billed
+				# rather than the Purchase Order's own rate (which may
+				# differ — see the Supplier Credit Note Variance report's
+				# own price-flag column). This is the figure Supplier Credit
+				# Note fetches as the amount to request back.
+				"fieldname": "custom_expected_discount_amount",
+				"label": "Rebate Due",
+				"fieldtype": "Currency",
+				"read_only": 1,
+				"insert_after": "custom_agreed_net_price",
+			},
+			{
+				# On the invoice itself this is just its own `rate`, mirrored
+				# under the same label the Purchase Order shows (there it is
+				# pulled in from elsewhere — see
+				# thameen_erp.overrides.purchase.write_back_actual_purchase_price)
+				# — kept in sync in validate_purchase_invoice.
+				"fieldname": "custom_actual_purchase_price",
+				"label": "Actual Purchase Price",
 				"fieldtype": "Currency",
 				"read_only": 1,
 				"insert_after": "custom_expected_discount_amount",
@@ -941,7 +1120,7 @@ def get_custom_fields() -> dict:
 				"options": CREDIT_NOTE_STATUS,
 				"default": "Not Applicable",
 				"read_only": 1,
-				"insert_after": "custom_agreed_net_price",
+				"insert_after": "custom_actual_purchase_price",
 			},
 			{
 				"fieldname": "custom_credit_note_received",
@@ -949,6 +1128,18 @@ def get_custom_fields() -> dict:
 				"fieldtype": "Currency",
 				"read_only": 1,
 				"insert_after": "custom_credit_note_status",
+			},
+			{
+				# Expected Discount minus Credit Note Received, floored at 0 —
+				# kept in sync on every save (thameen_erp.overrides.purchase.
+				# _sync_credit_note_outstanding) and whenever a Credit Note
+				# applies against this line (write_back_actual_purchase_price's
+				# sibling, apply_credit_note_to_rebate).
+				"fieldname": "custom_credit_note_outstanding",
+				"label": "Credit Note Outstanding",
+				"fieldtype": "Currency",
+				"read_only": 1,
+				"insert_after": "custom_credit_note_received",
 			},
 			{
 				"fieldname": "custom_vehicle",
@@ -1062,10 +1253,32 @@ def get_custom_fields() -> dict:
 				"fieldname": "custom_vehicle_load_type",
 				"label": "Vehicle Load Type",
 				"fieldtype": "Select",
-				"options": "\nTrip Loading\nManual Load\nManual Unload\nInbound Unload",
+				"options": "\nTrip Loading\nManual Load\nManual Unload\nInbound Unload\nRemainder Unload",
 				"read_only": 1,
 				"in_standard_filter": 1,
 				"insert_after": "custom_vehicle",
+			},
+		],
+		"Delivery Trip Item": [
+			{
+				# What happens to the gap between Planned Qty and Delivered Qty
+				# once a customer trip is marked Delivered — "Keep in Vehicle"
+				# (the system's own default, nothing moves) matches what already
+				# happened silently before this field existed: an undelivered
+				# remainder just stayed in the vehicle warehouse. "Unload to
+				# Main Warehouse" instead raises a Material Transfer back to the
+				# trip's own loading warehouse
+				# (thameen_erp.overrides.delivery_trip.DeliveryTrip.
+				# unload_remainder_to_warehouse). Typically bagged cement goes
+				# back to the warehouse while bulk cement stays loaded for the
+				# next job, but this is the dispatcher's own call per item, not
+				# something the system decides from the item itself.
+				"fieldname": "custom_remainder_action",
+				"label": "Remainder",
+				"fieldtype": "Select",
+				"options": "Keep in Vehicle\nUnload to Main Warehouse",
+				"default": "Keep in Vehicle",
+				"insert_after": "delivered_qty",
 			},
 		],
 		"Purchase Order": [
@@ -1077,6 +1290,20 @@ def get_custom_fields() -> dict:
 				"read_only": 1,
 				"insert_after": "supplier_name",
 				"description": "Raised from a Delivery Trip — either to cover a stock shortfall or for a direct-from-supplier delivery.",
+			},
+			{
+				"fieldname": "custom_rebate_section",
+				"label": "Rebate",
+				"fieldtype": "Section Break",
+				"insert_after": "schedule_date",
+			},
+			{
+				"fieldname": "custom_add_rebate",
+				"label": "Add Rebate",
+				"fieldtype": "Check",
+				"default": "1",
+				"description": "Reduce each item's rate by its rebate percentage.",
+				"insert_after": "custom_rebate_section",
 			},
 		],
 		"Purchase Receipt": [
@@ -1109,6 +1336,24 @@ def get_custom_fields() -> dict:
 				"fieldtype": "Table",
 				"options": "Purchase Receipt Pickup Vehicle",
 				"insert_after": "custom_pickup_vehicles_section",
+			},
+			{
+				"fieldname": "custom_rebate_section",
+				"label": "Rebate",
+				"fieldtype": "Section Break",
+				"insert_after": "custom_pickup_vehicles",
+			},
+			{
+				# Only acts on a line with no Purchase Order behind it -- one
+				# raised off a PO already carries that PO's own (possibly
+				# already rebated) rate untouched. See thameen_erp.overrides.
+				# purchase_invoice's module docstring.
+				"fieldname": "custom_add_rebate",
+				"label": "Add Rebate",
+				"fieldtype": "Check",
+				"default": "1",
+				"description": "Reduce each item's rate by its rebate percentage. Only applies to lines with no Purchase Order behind them.",
+				"insert_after": "custom_rebate_section",
 			},
 		],
 		"Material Request": [

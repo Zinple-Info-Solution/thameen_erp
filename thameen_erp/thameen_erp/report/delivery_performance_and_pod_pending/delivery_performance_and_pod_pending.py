@@ -52,7 +52,7 @@ def execute(filters=None):
 				**row,
 				"delay_days": delay,
 				"on_time": 1 if (delay is not None and delay <= 0) else 0,
-				"pod_status": _("Received") if row.pod_received else _("Pending"),
+				"pod_status": _("Received") if row.pod_received else _("Awaiting POD"),
 			}
 		)
 
@@ -92,7 +92,7 @@ def get_columns():
 		{"label": _("Driver"), "fieldname": "driver", "fieldtype": "Link", "options": "Driver", "width": 120},
 		{"label": _("Sales Order"), "fieldname": "sales_order", "fieldtype": "Link", "options": "Sales Order", "width": 140},
 		{"label": _("Promised"), "fieldname": "promised_date", "fieldtype": "Date", "width": 100},
-		{"label": _("Delivered"), "fieldname": "delivered_on", "fieldtype": "Date", "width": 100},
+		{"label": _("Actual Delivery Date"), "fieldname": "delivered_on", "fieldtype": "Date", "width": 100},
 		{"label": _("Delay (Days)"), "fieldname": "delay_days", "fieldtype": "Int", "width": 100},
 		{"label": _("Delivery Note"), "fieldname": "delivery_note", "fieldtype": "Link", "options": "Delivery Note", "width": 150},
 		{"label": _("POD"), "fieldname": "pod_status", "fieldtype": "Data", "width": 90},

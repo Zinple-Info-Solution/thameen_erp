@@ -66,7 +66,7 @@
    "label": "Company",
    "options": "Company",
    "reqd": 1,
-   "default": ":Company"
+   "remember_last_selected_value": 1
   },
   {
    "fieldname": "col_break_1",
@@ -127,7 +127,7 @@
   {
    "fieldname": "total_expected",
    "fieldtype": "Currency",
-   "label": "Total Expected",
+   "label": "Total Rebate Due",
    "read_only": 1
   },
   {
@@ -190,7 +190,7 @@
    "fieldtype": "Check",
    "label": "Create Debit Note on Submit",
    "default": "1",
-   "description": "Raises a return Purchase Invoice for the actual credit amount."
+   "description": "Raises a return Purchase Invoice for the Rebate Amount Received above."
   },
   {
    "fieldname": "debit_note",
