@@ -1,0 +1,77 @@
+{
+ "actions": [],
+ "creation": "2026-11-05 10:00:00.000000",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "sales_invoice_item",
+  "item_code",
+  "qty",
+  "rate",
+  "max_creditable",
+  "amount"
+ ],
+ "fields": [
+  {
+   "fieldname": "sales_invoice_item",
+   "fieldtype": "Data",
+   "label": "Sales Invoice Item Row",
+   "reqd": 1,
+   "description": "Row name of the Sales Invoice Item this credit note settles."
+  },
+  {
+   "fieldname": "item_code",
+   "fieldtype": "Link",
+   "label": "Item",
+   "options": "Item",
+   "reqd": 1,
+   "in_list_view": 1,
+   "columns": 2
+  },
+  {
+   "fieldname": "qty",
+   "fieldtype": "Float",
+   "label": "Qty",
+   "in_list_view": 1,
+   "columns": 1
+  },
+  {
+   "fieldname": "rate",
+   "fieldtype": "Currency",
+   "label": "Invoice Rate",
+   "read_only": 1,
+   "in_list_view": 1,
+   "columns": 2
+  },
+  {
+   "fieldname": "max_creditable",
+   "fieldtype": "Currency",
+   "label": "Max Creditable",
+   "read_only": 1,
+   "columns": 2,
+   "description": "This line's own amount (qty x rate) minus whatever other submitted Customer Credit Notes have already credited against it."
+  },
+  {
+   "fieldname": "amount",
+   "fieldtype": "Currency",
+   "label": "Credit Amount",
+   "reqd": 1,
+   "in_list_view": 1,
+   "columns": 2,
+   "description": "How much of this line to credit back to the customer now, excluding VAT."
+  }
+ ],
+ "index_web_pages_for_search": 1,
+ "links": [],
+ "modified": "2026-11-05 10:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "Thameen ERP",
+ "name": "Customer Credit Note Item",
+ "owner": "Administrator",
+ "permissions": [],
+ "sort_field": "creation",
+ "sort_order": "DESC",
+ "states": [],
+ "istable": 1,
+ "editable_grid": 1
+}
