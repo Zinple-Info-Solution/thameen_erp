@@ -42,8 +42,9 @@ def execute(filters=None):
 		as_dict=True,
 	)
 
-	credit_notes = get_credit_notes([r.pi_item for r in rows])
+	credit_notes, debit_note_info = get_credit_notes([r.pi_item for r in rows])
 	today = nowdate()
+	docstatus_label = {0: _("Draft"), 1: _("Submitted"), 2: _("Cancelled")}
 
 	data = []
 	for row in rows:
@@ -52,6 +53,18 @@ def execute(filters=None):
 		variance = received - expected
 		po_rate = flt(row.po_rate) if row.purchase_order else None
 		price_flag = bool(po_rate is not None and abs(flt(row.rate) - po_rate) > PRICE_TOLERANCE)
+
+		scn_rows = credit_notes.get(row.pi_item, [])
+		debit_note_names, debit_note_dates, debit_note_statuses = [], [], []
+		for scn_row in scn_rows:
+			if not scn_row.debit_note:
+				debit_note_names.append(_("Not Raised"))
+				continue
+			info = debit_note_info.get(scn_row.debit_note)
+			debit_note_names.append(scn_row.debit_note)
+			debit_note_dates.append(str(info.posting_date) if info else "")
+			debit_note_statuses.append(docstatus_label.get(info.docstatus, "") if info else "")
+
 		data.append(
 			{
 				**row,
@@ -60,7 +73,10 @@ def execute(filters=None):
 				"variance": variance,
 				"pending": max(expected - received, 0),
 				"age": date_diff(today, row.posting_date),
-				"credit_notes": ", ".join(credit_notes.get(row.pi_item, [])),
+				"credit_notes": ", ".join(scn_row.scn_name for scn_row in scn_rows),
+				"debit_note": ", ".join(debit_note_names),
+				"debit_note_date": ", ".join(debit_note_dates),
+				"debit_note_status": ", ".join(debit_note_statuses),
 				"po_expected_rebate": flt(row.po_expected_rebate) if row.purchase_order else None,
 				"price_flag": _("Review") if price_flag else "",
 			}
@@ -94,11 +110,15 @@ def build_conditions(filters):
 
 
 def get_credit_notes(pi_items):
+	"""For each invoice line: every submitted Supplier Credit Note covering
+	it, each paired with the debit note (return Purchase Invoice) it raised
+	-- the exact number/date/status question a credit note's accounting
+	backing is routinely asked about, answered straight from the report."""
 	if not pi_items:
-		return {}
+		return {}, {}
 	rows = frappe.db.sql(
 		"""
-		select scni.purchase_invoice_item as pi_item, scn.name
+		select scni.purchase_invoice_item as pi_item, scn.name as scn_name, scn.debit_note
 		from `tabSupplier Credit Note Item` scni
 		inner join `tabSupplier Credit Note` scn on scn.name = scni.parent
 		where scn.docstatus = 1 and scni.purchase_invoice_item in %(pi_items)s
@@ -108,8 +128,20 @@ def get_credit_notes(pi_items):
 	)
 	out = {}
 	for row in rows:
-		out.setdefault(row.pi_item, []).append(row.name)
-	return out
+		out.setdefault(row.pi_item, []).append(row)
+
+	debit_notes = {row.debit_note for row in rows if row.debit_note}
+	debit_note_info = {}
+	if debit_notes:
+		debit_note_info = {
+			d.name: d
+			for d in frappe.get_all(
+				"Purchase Invoice",
+				filters={"name": ("in", list(debit_notes))},
+				fields=["name", "posting_date", "docstatus"],
+			)
+		}
+	return out, debit_note_info
 
 
 def get_chart(data):
@@ -145,4 +177,7 @@ def get_columns():
 		{"label": _("Outstanding"), "fieldname": "pending", "fieldtype": "Currency", "width": 120},
 		{"label": _("Status"), "fieldname": "status", "fieldtype": "Data", "width": 150},
 		{"label": _("Credit Notes"), "fieldname": "credit_notes", "fieldtype": "Data", "width": 180},
+		{"label": _("Debit Note"), "fieldname": "debit_note", "fieldtype": "Data", "width": 140},
+		{"label": _("Debit Note Date"), "fieldname": "debit_note_date", "fieldtype": "Data", "width": 120},
+		{"label": _("Debit Note Status"), "fieldname": "debit_note_status", "fieldtype": "Data", "width": 120},
 	]

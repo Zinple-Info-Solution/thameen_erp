@@ -169,17 +169,24 @@ class SupplierCreditNote(Document):
 			)
 
 	def make_debit_note(self):
-		"""Return Purchase Invoice for the credited Rebate Amount (the flat
-		'Add Rebate' mechanism -- not Rebate Due/Expected Net Price, which
-		this same Credit Note tracks and settles separately but does not
-		raise a debit note for), carrying over its share of the original
-		invoice's VAT -- a plain rate/qty return has no tax rows of its
-		own, so without this the input VAT already claimed on the credited
-		amount is never reversed."""
+		"""Return Purchase Invoice for whatever this Credit Note actually
+		settles -- Rebate Due (`actual_amount`, the Expected Net Price
+		mechanism) AND Rebate Amount (`flat_rebate_received`, the flat
+		'Add Rebate' mechanism), added together per line since both are
+		credited against the same Purchase Invoice Item and ERPNext only
+		allows one return's worth of qty against it in total -- carrying
+		over its share of the original invoice's VAT, since a plain
+		rate/qty return has no tax rows of its own and without this the
+		input VAT already claimed on the credited amount is never
+		reversed. This is also what makes the rebate visible in the
+		General Ledger: the Credit Note itself never posts anything on its
+		own, only this return Purchase Invoice does."""
 		if self.debit_note:
 			return
 
-		rows_to_credit = [r for r in self.items if flt(r.flat_rebate_received) > 0]
+		rows_to_credit = [
+			r for r in self.items if flt(r.actual_amount) + flt(r.flat_rebate_received) > 0
+		]
 		if not rows_to_credit:
 			return
 
@@ -192,12 +199,17 @@ class SupplierCreditNote(Document):
 		dn.update_stock = 0
 		dn.currency = pi.currency
 		dn.conversion_rate = pi.conversion_rate
-		dn.set_posting_time = 1
-		dn.posting_date = self.credit_note_date
+		# Posted at the actual current date/time (the ordinary default for a
+		# new document) rather than backdated to the credit note's own date --
+		# backdating risks landing before the original invoice's GL timestamp
+		# on the same calendar day, which ERPNext refuses outright. The
+		# credit note's own date is already on record via `credit_note_date`
+		# on this document.
 		dn.bill_no = self.credit_note_number
 		dn.remarks = _("Supplier Credit Note {0}").format(self.name)
 
 		for row in rows_to_credit:
+			credit_amount = flt(row.actual_amount) + flt(row.flat_rebate_received)
 			source = frappe.db.get_value(
 				"Purchase Invoice Item",
 				row.purchase_invoice_item,
@@ -209,7 +221,7 @@ class SupplierCreditNote(Document):
 				{
 					"item_code": row.item_code,
 					"qty": -1,
-					"rate": flt(row.flat_rebate_received),
+					"rate": credit_amount,
 					"uom": source.uom,
 					"conversion_factor": source.conversion_factor or 1,
 					"expense_account": source.expense_account,
@@ -223,8 +235,8 @@ class SupplierCreditNote(Document):
 		# themselves from this return's own net total on save. A flat
 		# "Actual" charge has nothing to recompute from, so it is scaled by
 		# how much of the original invoice's value this note reverses.
-		total_flat_received = sum(flt(r.flat_rebate_received) for r in rows_to_credit)
-		ratio = (total_flat_received / flt(pi.net_total)) if pi.net_total else 0
+		total_credited = sum(flt(r.actual_amount) + flt(r.flat_rebate_received) for r in rows_to_credit)
+		ratio = (total_credited / flt(pi.net_total)) if pi.net_total else 0
 		for t in pi.taxes:
 			dn.append(
 				"taxes",
