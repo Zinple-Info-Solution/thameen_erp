@@ -1,0 +1,74 @@
+{
+ "charts": [],
+ "content": "[{\"id\": \"a1b2c3d4e5\", \"type\": \"card\", \"data\": {\"card_name\": \"Tax Reports\", \"col\": 4}}]",
+ "creation": "2026-11-06 10:00:00.000000",
+ "custom_blocks": [],
+ "docstatus": 0,
+ "doctype": "Workspace",
+ "for_user": "",
+ "hide_custom": 0,
+ "icon": "small-file",
+ "idx": 0,
+ "is_hidden": 0,
+ "label": "Tax Reports",
+ "links": [
+  {
+   "hidden": 0,
+   "is_query_report": 0,
+   "label": "Tax Reports",
+   "link_count": 2,
+   "onboard": 0,
+   "type": "Card Break"
+  },
+  {
+   "dependencies": "Customer Credit Note",
+   "hidden": 0,
+   "is_query_report": 1,
+   "label": "Credit Note Taxes Report",
+   "link_to": "Credit Note Taxes Report",
+   "link_type": "Report",
+   "onboard": 0,
+   "type": "Link"
+  },
+  {
+   "dependencies": "Supplier Credit Note",
+   "hidden": 0,
+   "is_query_report": 1,
+   "label": "Debit Note Taxes Report",
+   "link_to": "Debit Note Taxes Report",
+   "link_type": "Report",
+   "onboard": 0,
+   "type": "Link"
+  }
+ ],
+ "modified": "2026-11-06 10:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "Thameen ERP",
+ "name": "Tax Reports",
+ "number_cards": [],
+ "owner": "Administrator",
+ "parent_page": "Accounting",
+ "public": 1,
+ "quick_lists": [],
+ "roles": [
+  {
+   "role": "Accounts Manager"
+  },
+  {
+   "role": "Accounts User"
+  },
+  {
+   "role": "Credit Note Officer"
+  },
+  {
+   "role": "Finance Approver"
+  },
+  {
+   "role": "System Manager"
+  }
+ ],
+ "sequence_id": 6.0,
+ "shortcuts": [],
+ "title": "Tax Reports",
+ "type": "Workspace"
+}

@@ -1,6 +1,6 @@
 {
  "charts": [],
- "content": "[{\"id\": \"38530ecd54\", \"type\": \"header\", \"data\": {\"text\": \"<span class=\\\"h4\\\"><b>Procure to Pay</b></span>\", \"col\": 12}}, {\"id\": \"87a02c8b9e\", \"type\": \"shortcut\", \"data\": {\"shortcut_name\": \"Purchase Order\", \"col\": 3}}, {\"id\": \"b83cd57ab6\", \"type\": \"shortcut\", \"data\": {\"shortcut_name\": \"Purchase Invoice\", \"col\": 3}}, {\"id\": \"5b318b0a07\", \"type\": \"shortcut\", \"data\": {\"shortcut_name\": \"Supplier Credit Note\", \"col\": 3}}, {\"id\": \"ebfaf60455\", \"type\": \"shortcut\", \"data\": {\"shortcut_name\": \"Credit Variance\", \"col\": 3}}, {\"id\": \"7ca1fb21c7\", \"type\": \"spacer\", \"data\": {\"col\": 12}}, {\"id\": \"91da93ff6c\", \"type\": \"header\", \"data\": {\"text\": \"<span class=\\\"h4\\\"><b>Manage</b></span>\", \"col\": 12}}, {\"id\": \"bdcb02f93b\", \"type\": \"card\", \"data\": {\"card_name\": \"Purchasing\", \"col\": 4}}, {\"id\": \"8d9f5cf5ff\", \"type\": \"card\", \"data\": {\"card_name\": \"Credit Note Tracking\", \"col\": 4}}]",
+ "content": "[{\"id\": \"38530ecd54\", \"type\": \"header\", \"data\": {\"text\": \"<span class=\\\"h4\\\"><b>Procure to Pay</b></span>\", \"col\": 12}}, {\"id\": \"87a02c8b9e\", \"type\": \"shortcut\", \"data\": {\"shortcut_name\": \"Purchase Order\", \"col\": 3}}, {\"id\": \"b83cd57ab6\", \"type\": \"shortcut\", \"data\": {\"shortcut_name\": \"Purchase Invoice\", \"col\": 3}}, {\"id\": \"5b318b0a07\", \"type\": \"shortcut\", \"data\": {\"shortcut_name\": \"Supplier Credit Note\", \"col\": 3}}, {\"id\": \"ebfaf60455\", \"type\": \"shortcut\", \"data\": {\"shortcut_name\": \"Credit Variance\", \"col\": 3}}, {\"id\": \"f3d9a1c7b2\", \"type\": \"shortcut\", \"data\": {\"shortcut_name\": \"Debit Notes\", \"col\": 3}}, {\"id\": \"7ca1fb21c7\", \"type\": \"spacer\", \"data\": {\"col\": 12}}, {\"id\": \"91da93ff6c\", \"type\": \"header\", \"data\": {\"text\": \"<span class=\\\"h4\\\"><b>Manage</b></span>\", \"col\": 12}}, {\"id\": \"bdcb02f93b\", \"type\": \"card\", \"data\": {\"card_name\": \"Purchasing\", \"col\": 4}}, {\"id\": \"8d9f5cf5ff\", \"type\": \"card\", \"data\": {\"card_name\": \"Credit Note Tracking\", \"col\": 4}}]",
  "creation": "2026-08-05 10:00:00.000000",
  "custom_blocks": [],
  "docstatus": 0,
@@ -151,6 +151,12 @@
    "label": "Credit Variance",
    "link_to": "Supplier Credit Note Variance",
    "type": "Report"
+  },
+  {
+   "color": "Purple",
+   "label": "Debit Notes",
+   "type": "URL",
+   "url": "/app/purchase-invoice?is_return=1"
   }
  ],
  "title": "Purchase & Credit Notes",
