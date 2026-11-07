@@ -245,6 +245,7 @@ has_permission = {
 override_doctype_dashboards = {
 	"Sales Order": "thameen_erp.dashboards.sales_order_dashboard",
 	"Purchase Order": "thameen_erp.dashboards.purchase_order_dashboard",
+	"Purchase Invoice": "thameen_erp.dashboards.purchase_invoice_dashboard",
 	"Delivery Trip": "thameen_erp.dashboards.delivery_trip_dashboard",
 	"Vehicle": "thameen_erp.dashboards.vehicle_dashboard",
 }

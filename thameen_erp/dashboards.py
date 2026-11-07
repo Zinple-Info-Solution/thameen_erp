@@ -37,6 +37,14 @@ def delivery_trip_dashboard(data):
 	return data
 
 
+def purchase_invoice_dashboard(data):
+	data.setdefault("non_standard_fieldnames", {})["Supplier Credit Note"] = "purchase_invoice"
+	data.setdefault("transactions", []).insert(
+		0, {"label": _("Credit Note"), "items": ["Supplier Credit Note"]}
+	)
+	return data
+
+
 def vehicle_dashboard(data):
 	nsf = data.setdefault("non_standard_fieldnames", {})
 	nsf.update(
