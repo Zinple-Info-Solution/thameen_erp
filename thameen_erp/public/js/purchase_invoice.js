@@ -1,5 +1,10 @@
 frappe.ui.form.on("Purchase Invoice", {
 	refresh(frm) {
+		if (frm.doc.is_return) {
+			// Debit notes carry their own title/QR/original-invoice print
+			// format -- the standard Purchase Invoice layout has none of that.
+			frm.meta.default_print_format = "Debit Note";
+		}
 		if (frm.doc.docstatus !== 1) return;
 		const pending = (frm.doc.items || []).some(
 			(r) => flt(r.custom_expected_discount_amount) > 0 &&

@@ -207,6 +207,8 @@ class SupplierCreditNote(Document):
 		# on this document.
 		dn.bill_no = self.credit_note_number
 		dn.remarks = _("Supplier Credit Note {0}").format(self.name)
+		dn.custom_supplier_credit_note = self.name
+		dn.custom_credit_note_number = self.credit_note_number
 
 		for row in rows_to_credit:
 			credit_amount = flt(row.actual_amount) + flt(row.flat_rebate_received)

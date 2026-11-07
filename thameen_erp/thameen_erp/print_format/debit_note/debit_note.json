@@ -1,0 +1,22 @@
+{
+ "align_labels_right": 0,
+ "creation": "2026-11-07 10:00:00.000000",
+ "custom_format": 1,
+ "disabled": 0,
+ "doc_type": "Purchase Invoice",
+ "docstatus": 0,
+ "doctype": "Print Format",
+ "font": "Default",
+ "html": "{%- from \"templates/print_formats/standard_macros.html\" import add_header -%}\n\n<div class=\"page-break\">\n    {%- if not doc.get(\"print_heading\") and not doc.get(\"select_print_heading\")\n        and doc.set(\"select_print_heading\", _(\"Debit Note\")) -%}{%- endif -%}\n    {{ add_header(0, 1, doc, letter_head, no_letterhead) }}\n\n    <div class=\"row\" style=\"margin-top: 15px;\">\n        <div class=\"col-xs-6\">\n            <label>{{ _(\"Supplier\") }}:</label> {{ doc.supplier_name or doc.supplier }}<br>\n            <label>{{ _(\"Debit Note Date\") }}:</label> {{ frappe.utils.formatdate(doc.posting_date) }}<br>\n            {% if doc.bill_no %}\n            <label>{{ _(\"Supplier Reference\") }}:</label> {{ doc.bill_no }}<br>\n            {% endif %}\n        </div>\n        <div class=\"col-xs-6 text-right\">\n            <label>{{ _(\"Original Purchase Invoice\") }}:</label> {{ doc.return_against or \"\" }}<br>\n            {% if doc.get(\"custom_credit_note_number\") %}\n            <label>{{ _(\"Supplier Credit Note No.\") }}:</label> {{ doc.get(\"custom_credit_note_number\") }}<br>\n            {% endif %}\n        </div>\n    </div>\n\n    <table class=\"table table-bordered table-condensed\" style=\"margin-top: 15px;\">\n        <thead>\n            <tr>\n                <th style=\"width: 40px\">{{ _(\"Sr\") }}</th>\n                <th>{{ _(\"Item\") }}</th>\n                <th class=\"text-right\" style=\"width: 80px\">{{ _(\"Qty\") }}</th>\n                <th class=\"text-right\" style=\"width: 120px\">{{ _(\"Rate\") }}</th>\n                <th class=\"text-right\" style=\"width: 120px\">{{ _(\"Amount\") }}</th>\n            </tr>\n        </thead>\n        <tbody>\n            {% for item in doc.items %}\n            <tr>\n                <td>{{ item.idx }}</td>\n                <td>{{ item.item_name or item.item_code }}</td>\n                <td class=\"text-right\">{{ item.qty|abs }}</td>\n                <td class=\"text-right\">{{ frappe.utils.fmt_money(item.rate, currency=doc.currency) }}</td>\n                <td class=\"text-right\">{{ frappe.utils.fmt_money(item.amount|abs, currency=doc.currency) }}</td>\n            </tr>\n            {% endfor %}\n        </tbody>\n    </table>\n\n    <div class=\"row\">\n        <div class=\"col-xs-7\"></div>\n        <div class=\"col-xs-5\">\n            <table class=\"table table-condensed\">\n                <tr>\n                    <td>{{ _(\"Net Total\") }}</td>\n                    <td class=\"text-right\">{{ frappe.utils.fmt_money(doc.net_total|abs, currency=doc.currency) }}</td>\n                </tr>\n                {% for tax in doc.taxes %}\n                <tr>\n                    <td>{{ tax.description }}</td>\n                    <td class=\"text-right\">{{ frappe.utils.fmt_money(tax.tax_amount|abs, currency=doc.currency) }}</td>\n                </tr>\n                {% endfor %}\n                <tr>\n                    <td><strong>{{ _(\"Grand Total\") }}</strong></td>\n                    <td class=\"text-right\"><strong>{{ frappe.utils.fmt_money(doc.grand_total|abs, currency=doc.currency) }}</strong></td>\n                </tr>\n            </table>\n        </div>\n    </div>\n\n    {% if doc.remarks %}\n    <div class=\"row\" style=\"margin-top: 10px;\">\n        <div class=\"col-xs-12\"><label>{{ _(\"Remarks\") }}:</label> {{ doc.remarks }}</div>\n    </div>\n    {% endif %}\n\n    <div class=\"row\" style=\"margin-top: 25px;\">\n        <div class=\"col-xs-8\"></div>\n        <div class=\"col-xs-4 text-center\">\n            <img src=\"data:image/png;base64,{{ get_debit_note_qr(doc) }}\" style=\"width: 110px; height: 110px;\">\n            <div style=\"font-size: 10px; margin-top: 3px;\">{{ _(\"Scan for debit note details\") }}</div>\n        </div>\n    </div>\n</div>\n",
+ "line_breaks": 0,
+ "modified": "2026-11-07 10:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "Thameen ERP",
+ "name": "Debit Note",
+ "owner": "Administrator",
+ "print_format_builder": 0,
+ "print_format_type": "Jinja",
+ "raw_printing": 0,
+ "show_section_headings": 0,
+ "standard": "Yes"
+}

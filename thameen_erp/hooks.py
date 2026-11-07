@@ -28,6 +28,13 @@ doctype_js = {
 	"Driver": "public/js/driver.js",
 }
 
+# QR code for the "Debit Note" print format on Purchase Invoice.
+jinja = {
+	"methods": [
+		"thameen_erp.utils.print_qr.get_debit_note_qr",
+	]
+}
+
 doctype_list_js = {
 	"Delivery Trip": "public/js/delivery_trip_list.js",
 }
@@ -221,6 +228,21 @@ fixtures = [
 					"Purchase and Credit Notes",
 					"Sales and Delivery",
 					"Fleet Management",
+				],
+			]
+		],
+	},
+
+	# Custom Fields
+	{
+		"dt": "Custom Field",
+		"filters": [
+			[
+				"name",
+				"in",
+				[
+					"Purchase Invoice-custom_supplier_credit_note",
+					"Purchase Invoice-custom_credit_note_number",
 				],
 			]
 		],
