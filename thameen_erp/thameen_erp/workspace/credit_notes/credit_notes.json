@@ -63,6 +63,9 @@
    "role": "Accounts Manager"
   },
   {
+   "role": "Finance Approver"
+  },
+  {
    "role": "System Manager"
   }
  ],
