@@ -69,6 +69,14 @@ def execute(filters=None):
 	rebate_map = get_rebate_voucher_map()
 
 	columns, rows = gl_execute(filters)
+	for col in columns:
+		if col.get("fieldname") == "balance":
+			# Balance is a running total -- summing it down the column (what
+			# the total row does for every other Currency column) produces a
+			# meaningless number, since filtering to only the rebate-related
+			# rows already breaks the running sequence it was computed over.
+			col["disable_total"] = 1
+
 	if not rows:
 		return columns + EXTRA_COLUMNS, []
 
