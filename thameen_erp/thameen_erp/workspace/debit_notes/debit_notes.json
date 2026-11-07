@@ -1,0 +1,87 @@
+{
+ "charts": [],
+ "content": "[{\"id\": \"d1e2f3a4b5\", \"type\": \"header\", \"data\": {\"text\": \"<span class=\\\"h4\\\"><b>Debit Notes</b></span>\", \"col\": 12}}, {\"id\": \"c6d7e8f9a0\", \"type\": \"shortcut\", \"data\": {\"shortcut_name\": \"Debit Notes\", \"col\": 3}}, {\"id\": \"b1c2d3e4f5\", \"type\": \"shortcut\", \"data\": {\"shortcut_name\": \"Supplier Credit Note\", \"col\": 3}}, {\"id\": \"a6b7c8d9e0\", \"type\": \"spacer\", \"data\": {\"col\": 12}}, {\"id\": \"f1a2b3c4d5\", \"type\": \"card\", \"data\": {\"card_name\": \"Debit Notes\", \"col\": 4}}]",
+ "creation": "2026-11-07 10:00:00.000000",
+ "custom_blocks": [],
+ "docstatus": 0,
+ "doctype": "Workspace",
+ "for_user": "",
+ "hide_custom": 0,
+ "icon": "small-file",
+ "idx": 0,
+ "is_hidden": 0,
+ "label": "Debit Notes",
+ "links": [
+  {
+   "hidden": 0,
+   "is_query_report": 0,
+   "label": "Debit Notes",
+   "link_count": 2,
+   "onboard": 0,
+   "type": "Card Break"
+  },
+  {
+   "hidden": 0,
+   "is_query_report": 0,
+   "label": "Supplier Credit Note",
+   "link_to": "Supplier Credit Note",
+   "link_type": "DocType",
+   "onboard": 0,
+   "type": "Link"
+  },
+  {
+   "dependencies": "Supplier Credit Note",
+   "hidden": 0,
+   "is_query_report": 1,
+   "label": "Debit Note Taxes Report",
+   "link_to": "Debit Note Taxes Report",
+   "link_type": "Report",
+   "onboard": 0,
+   "type": "Link"
+  }
+ ],
+ "modified": "2026-11-07 10:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "Thameen ERP",
+ "name": "Debit Notes",
+ "number_cards": [],
+ "owner": "Administrator",
+ "parent_page": "Purchase and Credit Notes",
+ "public": 1,
+ "quick_lists": [],
+ "roles": [
+  {
+   "role": "Accounts Manager"
+  },
+  {
+   "role": "Accounts User"
+  },
+  {
+   "role": "Credit Note Officer"
+  },
+  {
+   "role": "Purchase Manager"
+  },
+  {
+   "role": "System Manager"
+  }
+ ],
+ "sequence_id": 1.0,
+ "shortcuts": [
+  {
+   "color": "Purple",
+   "label": "Debit Notes",
+   "type": "URL",
+   "url": "/app/purchase-invoice?is_return=1"
+  },
+  {
+   "color": "Orange",
+   "doc_view": "List",
+   "label": "Supplier Credit Note",
+   "link_to": "Supplier Credit Note",
+   "type": "DocType"
+  }
+ ],
+ "title": "Debit Notes",
+ "type": "Workspace"
+}

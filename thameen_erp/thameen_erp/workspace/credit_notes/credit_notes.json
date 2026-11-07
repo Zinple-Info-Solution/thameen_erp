@@ -1,0 +1,82 @@
+{
+ "charts": [],
+ "content": "[{\"id\": \"e1f2a3b4c5\", \"type\": \"header\", \"data\": {\"text\": \"<span class=\\\"h4\\\"><b>Credit Notes</b></span>\", \"col\": 12}}, {\"id\": \"d6e7f8a9b0\", \"type\": \"shortcut\", \"data\": {\"shortcut_name\": \"Credit Notes\", \"col\": 3}}, {\"id\": \"c1d2e3f4a5\", \"type\": \"spacer\", \"data\": {\"col\": 12}}, {\"id\": \"b6c7d8e9f0\", \"type\": \"card\", \"data\": {\"card_name\": \"Credit Notes\", \"col\": 4}}]",
+ "creation": "2026-11-07 10:00:00.000000",
+ "custom_blocks": [],
+ "docstatus": 0,
+ "doctype": "Workspace",
+ "for_user": "",
+ "hide_custom": 0,
+ "icon": "small-file",
+ "idx": 0,
+ "is_hidden": 0,
+ "label": "Credit Notes",
+ "links": [
+  {
+   "hidden": 0,
+   "is_query_report": 0,
+   "label": "Credit Notes",
+   "link_count": 2,
+   "onboard": 0,
+   "type": "Card Break"
+  },
+  {
+   "hidden": 0,
+   "is_query_report": 0,
+   "label": "Customer Credit Note",
+   "link_to": "Customer Credit Note",
+   "link_type": "DocType",
+   "onboard": 0,
+   "type": "Link"
+  },
+  {
+   "dependencies": "Customer Credit Note",
+   "hidden": 0,
+   "is_query_report": 1,
+   "label": "Credit Note Taxes Report",
+   "link_to": "Credit Note Taxes Report",
+   "link_type": "Report",
+   "onboard": 0,
+   "type": "Link"
+  }
+ ],
+ "modified": "2026-11-07 10:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "Thameen ERP",
+ "name": "Credit Notes",
+ "number_cards": [],
+ "owner": "Administrator",
+ "parent_page": "Sales and Delivery",
+ "public": 1,
+ "quick_lists": [],
+ "roles": [
+  {
+   "role": "Sales Manager"
+  },
+  {
+   "role": "Sales User"
+  },
+  {
+   "role": "Operation Manager"
+  },
+  {
+   "role": "Accounts Manager"
+  },
+  {
+   "role": "System Manager"
+  }
+ ],
+ "sequence_id": 1.0,
+ "shortcuts": [
+  {
+   "color": "Pink",
+   "doc_view": "List",
+   "label": "Credit Notes",
+   "link_to": "Customer Credit Note",
+   "type": "DocType",
+   "stats_filter": "{\"status\": \"Draft\"}"
+  }
+ ],
+ "title": "Credit Notes",
+ "type": "Workspace"
+}

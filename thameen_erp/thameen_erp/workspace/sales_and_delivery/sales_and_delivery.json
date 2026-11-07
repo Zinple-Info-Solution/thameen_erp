@@ -1,6 +1,6 @@
 {
  "charts": [],
- "content": "[{\"id\": \"5c70c6e28b\", \"type\": \"header\", \"data\": {\"text\": \"<span class=\\\"h4\\\"><b>Order to Cash</b></span>\", \"col\": 12}}, {\"id\": \"75e43af7e0\", \"type\": \"shortcut\", \"data\": {\"shortcut_name\": \"Customer Requirement\", \"col\": 3}}, {\"id\": \"54b4900c79\", \"type\": \"shortcut\", \"data\": {\"shortcut_name\": \"Sales Order\", \"col\": 3}}, {\"id\": \"24fe6da176\", \"type\": \"shortcut\", \"data\": {\"shortcut_name\": \"Delivery Trip\", \"col\": 3}}, {\"id\": \"2cb3359230\", \"type\": \"shortcut\", \"data\": {\"shortcut_name\": \"Sales Invoice\", \"col\": 3}}, {\"id\": \"9e4f7a2c81\", \"type\": \"shortcut\", \"data\": {\"shortcut_name\": \"Credit Notes\", \"col\": 3}}, {\"id\": \"2585a3efc4\", \"type\": \"spacer\", \"data\": {\"col\": 12}}, {\"id\": \"26570234c6\", \"type\": \"header\", \"data\": {\"text\": \"<span class=\\\"h4\\\"><b>Manage</b></span>\", \"col\": 12}}, {\"id\": \"6591d7fd61\", \"type\": \"card\", \"data\": {\"card_name\": \"Requirement & Approval\", \"col\": 4}}, {\"id\": \"e3a5e6a624\", \"type\": \"card\", \"data\": {\"card_name\": \"Orders & Trips\", \"col\": 4}}, {\"id\": \"db1ab150ca\", \"type\": \"card\", \"data\": {\"card_name\": \"Billing\", \"col\": 4}}]",
+ "content": "[{\"id\": \"5c70c6e28b\", \"type\": \"header\", \"data\": {\"text\": \"<span class=\\\"h4\\\"><b>Order to Cash</b></span>\", \"col\": 12}}, {\"id\": \"75e43af7e0\", \"type\": \"shortcut\", \"data\": {\"shortcut_name\": \"Customer Requirement\", \"col\": 3}}, {\"id\": \"54b4900c79\", \"type\": \"shortcut\", \"data\": {\"shortcut_name\": \"Sales Order\", \"col\": 3}}, {\"id\": \"24fe6da176\", \"type\": \"shortcut\", \"data\": {\"shortcut_name\": \"Delivery Trip\", \"col\": 3}}, {\"id\": \"2cb3359230\", \"type\": \"shortcut\", \"data\": {\"shortcut_name\": \"Sales Invoice\", \"col\": 3}}, {\"id\": \"2585a3efc4\", \"type\": \"spacer\", \"data\": {\"col\": 12}}, {\"id\": \"26570234c6\", \"type\": \"header\", \"data\": {\"text\": \"<span class=\\\"h4\\\"><b>Manage</b></span>\", \"col\": 12}}, {\"id\": \"6591d7fd61\", \"type\": \"card\", \"data\": {\"card_name\": \"Requirement & Approval\", \"col\": 4}}, {\"id\": \"e3a5e6a624\", \"type\": \"card\", \"data\": {\"card_name\": \"Orders & Trips\", \"col\": 4}}, {\"id\": \"db1ab150ca\", \"type\": \"card\", \"data\": {\"card_name\": \"Billing\", \"col\": 4}}]",
  "creation": "2026-08-05 10:00:00.000000",
  "custom_blocks": [],
  "docstatus": 0,
@@ -207,14 +207,6 @@
    "link_to": "Sales Invoice",
    "type": "DocType",
    "stats_filter": "{\"status\": [\"in\", [\"Unpaid\", \"Overdue\"]]}"
-  },
-  {
-   "color": "Pink",
-   "doc_view": "List",
-   "label": "Credit Notes",
-   "link_to": "Customer Credit Note",
-   "type": "DocType",
-   "stats_filter": "{\"status\": \"Draft\"}"
   }
  ],
  "title": "Sales & Delivery",
