@@ -3,6 +3,9 @@ frappe.ui.form.on("Supplier Credit Note", {
 		frm.set_query("purchase_invoice", () => ({
 			filters: { supplier: frm.doc.supplier, docstatus: 1, is_return: 0 },
 		}));
+		frm.set_query("credit_account", () => ({
+			filters: { company: frm.doc.company, is_group: 0 },
+		}));
 	},
 
 	refresh(frm) {

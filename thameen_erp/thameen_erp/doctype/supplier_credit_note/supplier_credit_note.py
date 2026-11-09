@@ -13,6 +13,17 @@ class SupplierCreditNote(Document):
 		self.calculate_variance()
 		self.set_status()
 		self.validate_variance_approval()
+		self.set_default_credit_account()
+
+	def set_default_credit_account(self):
+		"""Rebates don't move stock -- credit Cost of Goods Sold by default,
+		same account the original invoice expensed. Left editable so Finance
+		can redirect it (e.g. to Inventory) before the debit note posts."""
+		if self.credit_account or not self.company:
+			return
+		self.credit_account = frappe.db.get_value(
+			"Account", {"account_number": "5111", "company": self.company, "is_group": 0}
+		)
 
 	def validate_invoice(self):
 		if not self.purchase_invoice:
@@ -226,7 +237,12 @@ class SupplierCreditNote(Document):
 					"rate": credit_amount,
 					"uom": source.uom,
 					"conversion_factor": source.conversion_factor or 1,
-					"expense_account": source.expense_account,
+					# Credit Account overrides each line's own original expense
+					# account -- one account, reviewed by Finance, credited for
+					# the whole note's net amount. Supplier (incl. VAT) and
+					# Input VAT are untouched by this; they post the same way
+					# regardless of which account is chosen here.
+					"expense_account": self.credit_account or source.expense_account,
 					"cost_center": source.cost_center,
 					"item_tax_template": source.item_tax_template,
 					"purchase_invoice_item": row.purchase_invoice_item,

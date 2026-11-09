@@ -29,6 +29,7 @@
   "variance_approval_note",
   "sec_acct",
   "create_debit_note",
+  "credit_account",
   "debit_note",
   "col_break_4",
   "credit_note_copy",
@@ -191,6 +192,13 @@
    "label": "Create Debit Note on Submit",
    "default": "1",
    "description": "Raises a return Purchase Invoice for the Rebate Amount Received above."
+  },
+  {
+   "fieldname": "credit_account",
+   "fieldtype": "Link",
+   "label": "Credit Account",
+   "options": "Account",
+   "description": "Credited for the Debit Note's net amount (excluding VAT) -- the Supplier account and Input VAT are unaffected by this choice. Defaults to Cost of Goods Sold; change it before submitting if this note should post elsewhere (e.g. Inventory, for an actual goods return)."
   },
   {
    "fieldname": "debit_note",
