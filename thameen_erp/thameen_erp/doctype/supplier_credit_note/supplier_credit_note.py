@@ -237,12 +237,16 @@ class SupplierCreditNote(Document):
 					"rate": credit_amount,
 					"uom": source.uom,
 					"conversion_factor": source.conversion_factor or 1,
-					# Credit Account overrides each line's own original expense
-					# account -- one account, reviewed by Finance, credited for
-					# the whole note's net amount. Supplier (incl. VAT) and
-					# Input VAT are untouched by this; they post the same way
-					# regardless of which account is chosen here.
-					"expense_account": self.credit_account or source.expense_account,
+					# Always Credit Account (set in validate(), never blank by
+					# submit) -- never the original line's own expense_account.
+					# That line's account can be Stock Received But Not Billed
+					# when the purchase went through a Purchase Receipt first;
+					# a rebate is a price correction, not a goods movement, so
+					# it must never post there regardless of how the original
+					# purchase was received. Supplier (incl. VAT) and Input VAT
+					# are untouched by this; they post the same way regardless
+					# of which account is chosen here.
+					"expense_account": self.credit_account,
 					"cost_center": source.cost_center,
 					"item_tax_template": source.item_tax_template,
 					"purchase_invoice_item": row.purchase_invoice_item,
